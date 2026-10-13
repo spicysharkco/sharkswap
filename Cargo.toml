@@ -1,0 +1,32 @@
+[package]
+name = "sharkswap"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Claude Code account switcher: swap between Claude Code accounts without logging in again"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/spicysharkco/sharkswap"
+readme = "README.md"
+keywords = ["claude-code", "claude", "account-switcher", "multi-account", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "sharkswap"
+path = "src/main.rs"
+
+[features]
+# Test hooks: environment variables that let the black-box tests stand in for
+# the macOS `security` tool and force the macOS code path on Linux. A build
+# without this feature has no code that reads them. Never install a build made
+# with it.
+test-hooks = []
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,6 @@
+# Aliases the rotator may move this machine's login to.
+# Whitespace separated; everything after a # is a comment. The rotator ranks the
+# pool by how much of each account is used; the order here only breaks ties.
+# Copy to ~/.config/sharkswap/pool and edit.
+personal
+work

@@ -1,0 +1,144 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.89.0
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+          cargo --version
+
+      # The black-box tests need bash 4+ (macOS ships 3.2), jq, node 20+ and perl.
+      # strace is optional and Linux only; without it the suite uses a weaker check.
+      - name: Install test tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jq perl strace
+          node --version
+
+      - name: Install test tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash jq node perl
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Clippy (test-hooks feature)
+        run: cargo clippy --locked --all-targets --features test-hooks -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --locked
+
+      - name: Unit tests (test-hooks feature)
+        run: cargo test --locked --features test-hooks
+
+      # The real `security -i` write path, round-tripped against a throwaway keychain.
+      # The keychain is added to the user search list for this step only; the trap puts
+      # the original list back and deletes it, however the step ends. The test reads
+      # SHARKSWAP_TEST_KEYCHAIN / _SERVICE only because SHARKSWAP_TEST_HOOKS=1 is
+      # set (test hooks, see the README); it is `#[ignore]`d everywhere else.
+      # Depending on the macOS version, `security create-keychain NAME.keychain` leaves
+      # a file called NAME.keychain or NAME.keychain-db: the step looks for whichever
+      # exists, requires it to be the throwaway under $RUNNER_TEMP, and cleans up both.
+      - name: Keychain round trip (macOS)
+        if: runner.os == 'macOS'
+        env:
+          SHARKSWAP_TEST_HOOKS: "1"
+          SHARKSWAP_TEST_SERVICE: sharkswap-ci-test-item
+        run: |
+          set -euo pipefail
+          kc_base="${RUNNER_TEMP:?}/sharkswap-ci.keychain"
+          kc="$kc_base"
+          original=()
+          while IFS= read -r line; do
+            original+=("$line")
+          done < <(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//')
+          cleanup() {
+            security list-keychains -d user -s ${original[@]+"${original[@]}"} || true
+            for k in "$kc_base" "$kc_base-db"; do
+              if [[ -e "$k" ]]; then security delete-keychain "$k" || true; fi
+            done
+            rm -f "$kc_base" "$kc_base-db"
+          }
+          trap cleanup EXIT
+          security create-keychain -p x "$kc_base"
+          if [[ -e "$kc_base-db" ]]; then kc="$kc_base-db"; fi
+          case "$kc" in
+            "$RUNNER_TEMP/sharkswap-ci.keychain" | "$RUNNER_TEMP/sharkswap-ci.keychain-db") ;;
+            *) echo "not the throwaway keychain: $kc" >&2; exit 1 ;;
+          esac
+          [[ -e "$kc" ]] || { echo "keychain was not created: $kc" >&2; exit 1; }
+          security set-keychain-settings -t 3600 "$kc"
+          security unlock-keychain -p x "$kc"
+          security list-keychains -d user -s "$kc" ${original[@]+"${original[@]}"}
+          # Two ignored tests, both against the throwaway keychain only: the round trip,
+          # and the edge of the line limit (a quoted `security -i` line of exactly 4094
+          # bytes goes on stdin, one of 4095 takes the argv form, each read back byte for
+          # byte; the stderr of the 4094-byte write must repeat none of the JSON). The
+          # count check stops a renamed test from passing by matching nothing.
+          SHARKSWAP_TEST_KEYCHAIN="$kc" cargo test --locked -- --ignored --nocapture \
+            keychain_round_trip keychain_line_limit_boundary 2>&1 | tee "$RUNNER_TEMP/keychain-tests.log"
+          grep -q 'test result: ok. 2 passed' "$RUNNER_TEMP/keychain-tests.log" \
+            || { echo "expected both keychain tests to run and pass" >&2; exit 1; }
+
+      # The binary people install has no test hooks. This build is the one built
+      # the way the README says, and it must not even contain the hook variable names
+      # (SHARKSWAP_TEST_*, SHARKSWAP_NOW, SHARKSWAP_LOCK_*).
+      - name: Build release binary (no test hooks)
+        run: cargo build --release --locked
+
+      - name: Release binary ignores the test hooks
+        run: |
+          bin=target/release/sharkswap
+          test -f "$bin" || { echo "no release binary at $bin" >&2; exit 1; }
+          # grep: 0 = found, 1 = not found, anything else (2) = it could not look.
+          rc=0
+          LC_ALL=C grep -aqE 'SHARKSWAP_(TEST|NOW|LOCK_)' "$bin" || rc=$?
+          case "$rc" in
+            0) echo "the release binary contains test hook names" >&2; exit 1 ;;
+            1) echo "no test hook string in the release binary" ;;
+            *) echo "grep failed (status $rc) while checking the release binary" >&2; exit 1 ;;
+          esac
+
+      # The black-box suite needs the hooks (a stand-in for `security`, and the macOS
+      # code path on any system), so it runs against a separate build that has them.
+      - name: Build test-hooks binary
+        run: cargo build --release --locked --features test-hooks --target-dir target/test-hooks
+
+      - name: Parity suite (command line and write containment)
+        env:
+          CS_BIN: ${{ github.workspace }}/target/test-hooks/release/sharkswap
+        run: |
+          bash --version | head -n 1
+          bash test/run.sh

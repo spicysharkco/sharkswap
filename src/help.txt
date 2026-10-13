@@ -1,0 +1,54 @@
+sharkswap: a Claude Code account switcher.
+
+Identity = the OAuth token in ~/.claude/.credentials.json (claudeAiOauth).
+The oauthAccount block in ~/.claude.json is only display metadata; swapping
+it without swapping the token gives a cosmetic switch that still bills the
+previously logged-in account. This script swaps BOTH.
+
+Per-account snapshots in ~/.sharkswap/:
+  <alias>.json        oauthAccount metadata block
+  <alias>.creds.json  claudeAiOauth token block (chmod 600)
+
+A token can only be captured while its account is the active /login, so build
+the store by logging into each account once and running: sharkswap save <alias>
+
+Usage:
+  sharkswap                    overview: active account, then every saved account
+                               with usage, reset countdown and reset time
+  sharkswap next               switch to the next account (round-robin), skipping any
+                               account the ceiling gate refuses
+  sharkswap <alias> [--force]
+                               switch to alias (swaps metadata + token). An account at
+                               or over its ceiling, or with no current reading of one,
+                               is refused with exit 75 unless --force (README: ceilings)
+  sharkswap pane <alias> [--force]
+                               print export CLAUDE_CONFIG_DIR for a parallel terminal,
+                               plus CLAUDE_CODE_OAUTH_TOKEN when the alias has one;
+                               an account at its ceiling is refused as above
+  sharkswap status             current account, token + login expiry, live usage
+                               (QUICK=1 skips the usage probe)
+  sharkswap list               saved accounts (✓ token captured, ✗ login expired)
+  sharkswap save <alias> [--force]
+                               snapshot current account (metadata + token); refused when
+                               this login is already saved under an alias that has a
+                               ceiling (README: ceilings) unless --force
+  sharkswap watch              auto-snapshot the active token on every change (daemon)
+  sharkswap best [--switch|--raw]
+                               rank saved accounts, most usable first
+                               (by max of 5h and week; blocked, stale, expired last)
+                               --switch moves to the top usable account
+                               --raw prints the ranked rows tab-separated, no table
+  sharkswap bar [alias]        one status-bar line: 5h · wk · login left
+  sharkswap probe [alias...]   one 1-token request per account: 5h and week use from
+                               the rate-limit headers (works with a one-year token;
+                               refreshes nothing)
+  sharkswap token set|rm|list|check|print <alias> …
+                               one-year tokens from `claude setup-token`: no monthly
+                               /login, no refresh race; `pane` prefers one.
+                               `print` writes the token to a pipe or $(...), never to a
+                               terminal; `check --model` sends one request through claude
+  sharkswap remove <alias>     delete stored account, its one-year token and its pane home
+  sharkswap rotate [--pool FILE] [--log FILE] [--state FILE] [--min-gap SEC] [--tick SEC] [--dry-run]
+                               run from a timer: move this login to another account once
+                               the current one is refused or at its ceiling
+                               (README: Rotation)
