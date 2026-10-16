@@ -12,6 +12,14 @@ Per-account snapshots in ~/.sharkswap/:
 A token can only be captured while its account is the active /login, so build
 the store by logging into each account once and running: sharkswap save <alias>
 
+An interrupted switch (a signal, a failed write) leaves
+~/.sharkswap/.identity.lock/switch-pending and the lock itself. Until you clear it,
+status, switching, rotate, save, remove and pane refuse with "unfinished account
+switch", list marks no account active, and bar prints "no account". To clear:
+stop users of the global login, look at the lock and any *.backup.* files it names,
+rm -rf ~/.sharkswap/.identity.lock, run sharkswap <alias>, then sharkswap status.
+(README: An interrupted switch)
+
 Usage:
   sharkswap                    overview: active account, then every saved account
                                with usage, reset countdown and reset time

@@ -152,7 +152,12 @@ impl Ctx {
         Ok(())
     }
 
+    /// The live email, empty when there is none or when an unfinished switch makes
+    /// the metadata untrustworthy (the check comes before the file is read).
     pub fn current_email(&self) -> String {
+        if crate::switch_intent::pending(&self.store) {
+            return String::new();
+        }
         let Some(v) = read_json(&self.files[0]) else {
             return String::new();
         };
@@ -177,6 +182,10 @@ impl Ctx {
             };
             let Value::Object(o) = &v else { continue };
             if jq_text(o.get("emailAddress")) == email {
+                // A switch may have started during the scan.
+                if crate::switch_intent::pending(&self.store) {
+                    return String::new();
+                }
                 return f[..f.len() - 5].to_string();
             }
         }
@@ -434,6 +443,7 @@ const SECURITY: &str = "/usr/bin/security";
 //   SHARKSWAP_NOW            the instant (epoch seconds) every judgement is made at
 //   SHARKSWAP_LOCK_ATTEMPTS  how many times the identity lock is tried (default 50)
 //   SHARKSWAP_LOCK_DELAY     seconds between those tries (default 0.1)
+//   SHARKSWAP_TEST_SWITCH_FAULT  where a switch is interrupted or made to fail (switch_intent.rs)
 // They let CI round-trip a login through a throwaway keychain, let the
 // black-box tests run the Keychain path against a stub on Linux, and let a test
 // pin the clock or shorten the lock wait. They are not settings, and nothing
@@ -454,6 +464,8 @@ pub const HOOK_NOW: &str = "SHARKSWAP_NOW";
 const HOOK_LOCK_ATTEMPTS: &str = "SHARKSWAP_LOCK_ATTEMPTS";
 #[cfg(any(test, feature = "test-hooks"))]
 const HOOK_LOCK_DELAY: &str = "SHARKSWAP_LOCK_DELAY";
+#[cfg(any(test, feature = "test-hooks"))]
+pub const HOOK_SWITCH_FAULT: &str = "SHARKSWAP_TEST_SWITCH_FAULT";
 
 /// The value of test hook `name` in the environment `var`: none unless the flag
 /// is `1`, and none when the value is empty.
@@ -905,12 +917,27 @@ pub fn alias_exact(alias: &str, dirs: &[&Path]) -> Result<(), i32> {
 
 // ---- the identity lock ----------------------------------------------------------
 
-static LOCK_PATHS: OnceLock<(std::ffi::CString, std::ffi::CString)> = OnceLock::new();
+/// The lock's owner file, its directory, and the switch-intent marker inside it.
+static LOCK_PATHS: OnceLock<(std::ffi::CString, std::ffi::CString, std::ffi::CString)> =
+    OnceLock::new();
 static LOCK_HELD: AtomicBool = AtomicBool::new(false);
 
+/// Whether `path` exists as itself (a link is not followed). `lstat` is
+/// async-signal-safe, so the signal handler may ask.
+fn exists_lstat(path: &std::ffi::CStr) -> bool {
+    // SAFETY: lstat takes a valid C string and a writable stat buffer.
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        libc::lstat(path.as_ptr(), &mut st) == 0
+    }
+}
+
 extern "C" fn on_signal(_sig: libc::c_int) {
+    // A lock that holds a switch-intent marker stays, owner file and all: the
+    // switch was cut short, and the next run must find that out.
     if LOCK_HELD.load(Ordering::SeqCst)
-        && let Some((owner, dir)) = LOCK_PATHS.get()
+        && let Some((owner, dir, pending)) = LOCK_PATHS.get()
+        && !exists_lstat(pending)
     {
         // SAFETY: unlink and rmdir are async-signal-safe and take valid C strings.
         unsafe {
@@ -953,11 +980,13 @@ pub struct IdLock {
 
 impl IdLock {
     pub fn acquire(ctx: &Ctx) -> Result<IdLock, i32> {
-        let dir = ctx.store.join(".identity.lock");
+        let dir = crate::switch_intent::lock_dir(&ctx.store);
         let owner_file = dir.join("owner");
         let (tries, delay) = lock_patience();
         let (mut i, mut hard) = (0i64, 0u32);
         loop {
+            // An unfinished switch holds the lock until a person has looked.
+            crate::switch_intent::ready(&ctx.store)?;
             let err: String;
             match std::fs::create_dir(&dir) {
                 Ok(()) => match std::fs::OpenOptions::new()
@@ -1020,11 +1049,16 @@ impl IdLock {
             let _ = std::fs::remove_dir_all(&dir);
             return Err(1);
         }
-        if let (Ok(o), Ok(d)) = (
+        if let (Ok(o), Ok(d), Ok(p)) = (
             std::ffi::CString::new(owner_file.as_os_str().as_encoded_bytes()),
             std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()),
+            std::ffi::CString::new(
+                crate::switch_intent::marker(&ctx.store)
+                    .as_os_str()
+                    .as_encoded_bytes(),
+            ),
         ) {
-            let _ = LOCK_PATHS.set((o, d));
+            let _ = LOCK_PATHS.set((o, d, p));
         }
         LOCK_HELD.store(true, Ordering::SeqCst);
         Ok(IdLock {
@@ -1049,7 +1083,14 @@ impl IdLock {
         self.signals.restore();
         let owner_file = self.dir.join("owner");
         if read_text(&owner_file).is_ok_and(|t| trim_nl(&t) == self.owner) {
-            let _ = std::fs::remove_dir_all(&self.dir);
+            if crate::switch_intent::pending_at(&self.dir) {
+                eprintln!(
+                    "error: unfinished account switch; identity lock retained at {} for inspection",
+                    self.dir.display()
+                );
+            } else {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
         }
     }
 }
@@ -1440,6 +1481,7 @@ mod tests {
             "SHARKSWAP_NOW" => Some("1800000000".into()),
             "SHARKSWAP_LOCK_ATTEMPTS" => Some("2".into()),
             "SHARKSWAP_LOCK_DELAY" => Some("0.01".into()),
+            "SHARKSWAP_TEST_SWITCH_FAULT" => Some("creds:fail".into()),
             _ => None,
         }
     }
@@ -1459,6 +1501,7 @@ mod tests {
                 HOOK_NOW,
                 HOOK_LOCK_ATTEMPTS,
                 HOOK_LOCK_DELAY,
+                HOOK_SWITCH_FAULT,
             ] {
                 assert_eq!(hook_in(&env, name), None, "{name} with flag {flag:?}");
             }
@@ -1553,6 +1596,88 @@ mod tests {
         drop(lock);
         assert!(!ctx.store.join(".identity.lock").exists());
         assert_eq!(dispositions(), before, "a drop restores them too");
+    }
+
+    #[test]
+    fn an_unfinished_switch_hides_the_live_identity_whatever_the_marker_is() {
+        use crate::switch_intent::{lock_dir, marker};
+        let home = TestStore::new(&[
+            (
+                ".claude.json",
+                json!({"oauthAccount": {"emailAddress": "alice@example.com"}}),
+            ),
+            (
+                ".sharkswap/work.json",
+                json!({"emailAddress": "alice@example.com"}),
+            ),
+        ]);
+        let ctx = Ctx::at(home.to_path_buf(), true).unwrap_or_else(|_| panic!("a context"));
+        assert_eq!(ctx.current_email(), "alice@example.com");
+        assert_eq!(ctx.current_alias(), "work");
+
+        std::fs::create_dir(lock_dir(&ctx.store)).expect("a lock directory");
+        let path = marker(&ctx.store);
+        // A regular file is never opened, a directory and a dangling link count too.
+        for what in ["a file", "a directory", "a dangling link"] {
+            match what {
+                "a file" => std::fs::write(&path, "").expect("file"),
+                "a directory" => std::fs::create_dir(&path).expect("dir"),
+                _ => std::os::unix::fs::symlink("/nonexistent/cs-intent", &path).expect("link"),
+            }
+            assert_eq!(ctx.current_email(), "", "{what}");
+            assert_eq!(ctx.current_alias(), "", "{what}");
+            if path.is_dir() {
+                std::fs::remove_dir(&path).expect("rmdir");
+            } else {
+                std::fs::remove_file(&path).expect("rm");
+            }
+        }
+        assert_eq!(
+            ctx.current_email(),
+            "alice@example.com",
+            "after the marker is gone"
+        );
+        assert_eq!(ctx.current_alias(), "work");
+    }
+
+    #[test]
+    fn an_unfinished_switch_keeps_the_identity_lock_and_refuses_the_next_one() {
+        use crate::switch_intent::{clear, lock_dir, publish};
+        let _serial = signal_lock();
+        let home = TestStore::new(&[]);
+        let ctx = Ctx::at(home.to_path_buf(), true).unwrap_or_else(|_| panic!("a context"));
+        let dir = lock_dir(&ctx.store);
+
+        let lock = IdLock::acquire(&ctx).unwrap_or_else(|_| panic!("the lock"));
+        publish(&ctx.store, "work").expect("the intent");
+        lock.done();
+        assert!(
+            dir.join("owner").is_file(),
+            "the owner file stays with the marker"
+        );
+        assert!(dir.join("switch-pending").is_file(), "so does the marker");
+        assert!(
+            IdLock::acquire(&ctx).is_err(),
+            "no one takes the lock, and no one waits for it"
+        );
+
+        // Dropped, as an early return would: the same.
+        std::fs::remove_dir_all(&dir).expect("cleared by hand");
+        let lock = IdLock::acquire(&ctx).unwrap_or_else(|_| panic!("the lock again"));
+        publish(&ctx.store, "work").expect("the intent");
+        drop(lock);
+        assert!(dir.join("switch-pending").is_file());
+
+        // A switch that finished clears the marker first, and then the lock goes.
+        std::fs::remove_dir_all(&dir).expect("cleared by hand");
+        let lock = IdLock::acquire(&ctx).unwrap_or_else(|_| panic!("the lock a third time"));
+        publish(&ctx.store, "work").expect("the intent");
+        clear(&ctx.store).expect("clear");
+        lock.done();
+        assert!(!dir.exists());
+        IdLock::acquire(&ctx)
+            .unwrap_or_else(|_| panic!("free again"))
+            .done();
     }
 
     #[test]

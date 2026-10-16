@@ -5,6 +5,7 @@ use crate::avail::is_own_file;
 use crate::caps::{self, Gate};
 use crate::probe;
 use crate::store::*;
+use crate::switch_intent;
 use crate::util::*;
 use serde_json::{Map, Value};
 use std::io::{BufRead, Write};
@@ -208,6 +209,8 @@ fn pad_r(s: &str, width: usize) -> String {
 // ---- status ---------------------------------------------------------------------
 
 pub fn cmd_status(ctx: &Ctx) -> Res {
+    // An unfinished switch leaves the live identity uncertain: say nothing about it.
+    switch_intent::ready(&ctx.store)?;
     let email = ctx.current_email();
     let alias = ctx.current_alias();
     println!(
@@ -630,14 +633,40 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
         }
     };
     let merged = serde_json::to_string(&merged).unwrap_or_default();
-    if ctx.creds_write(&merged).is_err() {
+    // The three live writes are not one transaction. The intent is recorded in
+    // the identity lock first, so that whatever cuts them short leaves a fact
+    // for the next run to find, and the lock stays until a person has looked.
+    if switch_intent::publish(&ctx.store, alias).is_err() {
+        eprintln!("error: could not record account switch intent; live identity was not changed");
         rm_cb(&creds_backup);
         cleanup(&backups);
         return Err(1);
     }
+    if ctx.creds_write(&merged).is_err() {
+        // The backend may have written before it failed, or failed to put its old
+        // value back: keep the intent, the lock and the backups rather than guess
+        // which login is live.
+        if !creds_had {
+            rm_cb(&creds_backup);
+            creds_backup = None;
+        }
+        for k in creds_backup.iter().chain(&backups) {
+            eprintln!(
+                "error: a copy of the previous file is kept at {}",
+                k.display()
+            );
+        }
+        return Err(1);
+    }
+    switch_intent::fault("creds");
     let mut failed = false;
     for (text, d) in staged.iter().zip(&destinations) {
-        if write_atomic(d, text.as_bytes(), 0o600).is_err() {
+        let point = if *d == ctx.files[0] {
+            "primary"
+        } else {
+            "secondary"
+        };
+        if write_atomic(d, text.as_bytes(), 0o600).is_err() || switch_intent::fault(point) {
             failed = true;
             break;
         }
@@ -648,7 +677,7 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
         let mut not_restored: Vec<String> = Vec::new();
         let mut kept: Vec<PathBuf> = Vec::new();
         for (b, d) in backups.iter().zip(&destinations) {
-            if copy_p(b, d).is_err() {
+            if switch_intent::fault("rollback") || copy_p(b, d).is_err() {
                 not_restored.push(d.display().to_string());
                 kept.push(b.clone());
             }
@@ -679,8 +708,16 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
             remove_new_creds(&ctx.creds, &mut not_restored);
         }
         if not_restored.is_empty() {
-            rm_cb(&creds_backup);
-            cleanup(&backups);
+            // Put back in full: the intent can go, and the backups with it, unless
+            // the intent cannot be removed, when they stay for inspection.
+            if switch_intent::clear(&ctx.store).is_ok() {
+                rm_cb(&creds_backup);
+                cleanup(&backups);
+            } else {
+                eprintln!(
+                    "error: prior identity restored but switch intent could not be cleared; backups retained for inspection"
+                );
+            }
             eprintln!("error: switch commit failed; restored prior state where possible");
             return Err(1);
         }
@@ -708,6 +745,10 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
         }
         return Err(1);
     }
+    if switch_intent::clear(&ctx.store).is_err() {
+        eprintln!("error: account switch completed but its intent could not be cleared");
+        return Err(1);
+    }
     rm_cb(&creds_backup);
     for b in &backups {
         rm_f(b);
@@ -728,6 +769,9 @@ pub fn cmd_switch(ctx: &Ctx, args: &[String]) -> Res {
     let (alias, force) = alias_force(args);
     check_alias(&alias, false)?;
     alias_exact(&alias, &[&ctx.store])?;
+    // Before the plan: "from" would be unknown, and nobody should be asked to
+    // confirm a move from a login that cannot be named.
+    switch_intent::ready(&ctx.store)?;
     let src = ctx.meta(&alias);
     if !is_file(&src) {
         eprintln!("error: unknown account '{alias}'");
@@ -1573,6 +1617,7 @@ pub fn cmd_overview(ctx: &Ctx) -> Res {
 }
 
 pub fn cmd_toggle(ctx: &Ctx) -> Res {
+    switch_intent::ready(&ctx.store)?;
     let files = account_aliases(ctx);
     if files.is_empty() {
         eprintln!("error: no accounts registered in {}", ctx.store.display());

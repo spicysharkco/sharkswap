@@ -51,6 +51,7 @@
 use crate::caps::{Caps, ceiling_of, effective_caps};
 use crate::probe::{Cred, Reply, ask, file_login, probe_cred, probe_model};
 use crate::store::{COMMAND_WORDS, Ctx, Spelling, alias_ok, alias_spelling, valid_oauth_file};
+use crate::switch_intent;
 use crate::util::*;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1444,6 +1445,21 @@ fn xdg(var: &str, home: &Path, fallback: &str) -> String {
     }
 }
 
+/// Whether an unfinished account switch is recorded; if so, the run says it
+/// cannot go on (`to` names the target of a switch this run made, `doing` what
+/// the run was about to do). The live login is uncertain, so a rotation neither
+/// trusts it nor writes anything down about it.
+fn unfinished_switch(ctx: &Ctx, run: &Run, to: &str, doing: &str) -> bool {
+    if !switch_intent::pending(&ctx.store) {
+        return false;
+    }
+    run.error(&format!(
+        "unfinished account switch{to}; inspect the identity lock at {} before {doing}",
+        switch_intent::lock_dir(&ctx.store).display()
+    ));
+    true
+}
+
 pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
     let cfg = xdg("XDG_CONFIG_HOME", &ctx.home, ".config");
     let state = xdg("XDG_STATE_HOME", &ctx.home, ".local/state");
@@ -1485,6 +1501,11 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
     if !all_digits(&tick) || tick.starts_with('0') {
         run.error(&format!("--tick takes whole seconds above 0, got '{tick}'"));
         return Err(2);
+    }
+    // An unfinished switch leaves the live login uncertain: nothing is probed,
+    // decided or recorded, a dry run included.
+    if unfinished_switch(ctx, &run, "", "rotating") {
+        return Err(1);
     }
     let min_gap: f64 = min_gap.parse().unwrap_or(f64::INFINITY);
     let tick: f64 = tick.parse().unwrap_or(f64::INFINITY);
@@ -1536,6 +1557,10 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
     // there is nothing to wait for, and a host without one is better off on any
     // account than on none.
     let cur = ctx.current_alias();
+    // An empty alias would send this down the live-credentials branch below.
+    if unfinished_switch(ctx, &run, "", "rotating") {
+        return Err(1);
+    }
     let mut cur_rec: Option<Record> = None;
     // Joins the caps table's notes below, so it is logged once like they are.
     let mut login_note: Option<String> = None;
@@ -1698,6 +1723,12 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
         return Err(1);
     };
 
+    // A switch that began while this run was reading must not be recorded as a
+    // reading of the account it was leaving.
+    if unfinished_switch(ctx, &run, "", "recording a reading") {
+        return Err(1);
+    }
+
     // What this run saw of the current account is what the next run's rate is
     // measured from, and a run that saw nothing is one more unreadable run for it
     // (the decision leaves an unreadable account after two). A dry run leaves the
@@ -1788,6 +1819,19 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
     rm_f(&out_path);
     OUT_MADE.store(false, Ordering::SeqCst);
 
+    // A child that left its intent behind has not switched or failed in any way
+    // that is safe to write down: no switch time and no failure, so no cooldown
+    // that did not happen. The reading taken before it stays.
+    if unfinished_switch(ctx, &run, &format!(" to {target}"), "rotating") {
+        for line in out_text
+            .split('\n')
+            .filter(|l| l.starts_with("error"))
+            .take(3)
+        {
+            run.log(&format!("  {line}"));
+        }
+        return Err(1);
+    }
     let now_alias = ctx.current_alias();
     // The host moved when the login is not the one it started on, whether or not
     // it landed on the target: a half-done swap still counts as a switch for the

@@ -7,6 +7,7 @@ mod cmds;
 mod probe;
 mod rotate;
 mod store;
+mod switch_intent;
 #[cfg(test)]
 mod testkit;
 mod util;

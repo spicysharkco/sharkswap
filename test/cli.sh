@@ -161,6 +161,17 @@ s_keychain_path() {
   assert_err_has "and says the write failed" "Keychain write failed"
   assert_out_lacks "no token in the output" "fake-"
   assert_eq "nothing changed" "bob@example.com" "$(live_email)"
+  # A backend error does not prove that it changed nothing, so the switch intent
+  # and the identity lock stay, and everything that trusts the live login refuses.
+  assert_file "the failed write leaves the switch intent" "$H/.sharkswap/.identity.lock/switch-pending"
+  assert_err_has "and says the lock is kept" "identity lock retained at $H/.sharkswap/.identity.lock for inspection"
+  assert_err_has "the copy of the previous file is kept too" "a copy of the previous file is kept at"
+  assert_eq "it exists" "1" "$(find "$H" -maxdepth 1 -name '.claude.json.backup.*' | wc -l | tr -d ' ')"
+  cs status
+  assert_rc "status refuses" 1
+  assert_err_has "and says why" "unfinished account switch"
+  rm -rf "${H:?}/.sharkswap/.identity.lock"
+  find "$H" -name '*.backup.*' -delete
 
   # (c2) the first write works, the metadata commit then fails, and so does the
   # put-back: the run says the previous login was NOT restored and exits non-zero.
@@ -186,6 +197,16 @@ s_keychain_path() {
   assert_mode "and is private" "$saved" 600
   assert_eq "it holds the previous login" "$(cat "$W/item.small")" "$(cat "$saved")"
   assert_err_has "the message names the recovery file" "the previous login is saved in $saved"
+  # Nothing is known about the live login any more: the intent and the lock stay.
+  assert_eq "the switch intent names the target" "work" "$(cat "$H/.sharkswap/.identity.lock/switch-pending")"
+  cs status
+  assert_rc "status refuses after a switch that could not be undone" 1
+  assert_err_has "and says why" "unfinished account switch"
+  cs best --switch
+  assert_rc "so does a switch" 1
+  cs rotate --dry-run
+  assert_rc "and a rotation" 1
+  rm -rf "${H:?}/.sharkswap/.identity.lock"
 
   # (d) no login in the Keychain: a save is refused and never writes to it.
   new_world keychain_empty
@@ -214,6 +235,231 @@ s_keychain_path() {
   assert_eq "the snapshot holds the decoded login" "$json" "$(jq -c . "$H/.sharkswap/carol.creds.json")"
   assert_eq "with its non-ASCII text intact" "$note" "$(jq -r .claudeAiOauth.note "$H/.sharkswap/carol.creds.json")"
   CS_ENV=()
+}
+
+# After an unfinished global switch (the intent marker is inside the identity
+# lock) everything that would trust or change the live login refuses, and the
+# views that do not need it say so by showing no active account.
+intent_refuses() {  # label
+  local l="$1"
+  cs status
+  assert_rc "$l: status refuses" 1
+  assert_err_has "$l: and says why" "unfinished account switch"
+  assert_eq "$l: and prints no identity" "" "$OUT"
+  cs work
+  assert_rc "$l: a switch refuses" 1
+  assert_err_has "$l: at once, not after waiting for the lock" "unfinished account switch"
+  assert_out_lacks "$l: before it prints a plan" "Switch plan"
+  cs next
+  assert_rc "$l: next refuses" 1
+  cs save extra
+  assert_rc "$l: save refuses" 1
+  assert_err_has "$l: and names the lock" "inspect the identity lock at $H/.sharkswap/.identity.lock"
+  cs remove personal
+  assert_rc "$l: remove refuses" 1
+  assert_file "$l: and removed nothing" "$H/.sharkswap/personal.json"
+  cs rotate --dry-run
+  assert_rc "$l: a dry-run rotation refuses" 1
+  assert_err_has "$l: and says so" "unfinished account switch"
+  cs rotate
+  assert_rc "$l: a rotation refuses" 1
+  assert_eq "$l: with an ERROR line in the log" "1" "$(grep -c 'ERROR: unfinished account switch' "$W/state/sharkswap-rotate.log" || true)"
+  assert_no_file "$l: before any state is written" "$W/state/sharkswap-rotate.json"
+  rm -f "$W/state/sharkswap-rotate.log"
+  cs list
+  assert_rc "$l: list still reads the saved accounts" 0
+  assert_out_has "$l: it shows them" "alice@example.com"
+  assert_eq "$l: and marks none of them active" "0" "$(grep -c 'active' <<<"$OUT" || true)"
+  cs best
+  assert_rc "$l: best still ranks them" 0
+  cs bar
+  assert_out_has "$l: bar does not name an account from the live metadata" "no account"
+  cs bar work
+  assert_rc "$l: bar for a named account still works" 0
+  assert_out_has "$l: and shows it" "work"
+}
+
+# What a person does after looking: stop the users of the global login, remove the
+# abandoned lock and the leftovers, and switch to a known account.
+intent_recover() {
+  rm -rf "${H:?}/.sharkswap/.identity.lock"
+  find "$H" -name '*.backup.*' -delete
+  find "$H/.claude" -name '*.switch-backup.*' -delete
+  cs personal
+  assert_rc "recovery: an explicit switch works once the lock is cleared" 0
+  assert_eq "recovery: the login is the account asked for" "bob@example.com" "$(live_email)"
+  assert_eq "recovery: with its token" "$(fake_token 2)" "$(live_token)"
+}
+
+s_switch_intent() {
+  section "an interrupted switch stays fail-closed"
+  new_world intent
+  save_as work alice@example.com 1
+  save_as personal bob@example.com 2
+  local lock="$H/.sharkswap/.identity.lock" marker="$H/.sharkswap/.identity.lock/switch-pending"
+  local spec point sig want_rc want_tok want_primary
+
+  # The switch is cut short at each of its steps, by TERM (the process cleans up
+  # after itself) and by KILL (it cannot). The intent was written before any live
+  # file changed, so the lock and the intent stay in every case.
+  for spec in intent:TERM creds:TERM primary:TERM secondary:TERM intent:KILL creds:KILL primary:KILL secondary:KILL; do
+    point="${spec%%:*}"; sig="${spec##*:}"
+    want_rc=130; [[ "$sig" == KILL ]] && want_rc=137
+    want_tok="$(fake_token 1)"; want_primary="alice@example.com"
+    if [[ "$point" == intent ]]; then want_tok="$(fake_token 2)"; fi
+    if [[ "$point" == intent || "$point" == creds ]]; then want_primary="bob@example.com"; fi
+    CS_ENV=(SHARKSWAP_TEST_SWITCH_FAULT="$spec")
+    cs work
+    CS_ENV=()
+    assert_rc "$spec: the switch is cut short" "$want_rc"
+    assert_file "$spec: the lock stays" "$lock/owner"
+    assert_eq "$spec: the intent names the target" "work" "$(cat "$marker")"
+    assert_mode "$spec: and is private" "$marker" 600
+    assert_eq "$spec: the live token is where the switch got to" "$want_tok" "$(live_token)"
+    assert_eq "$spec: so is the primary configuration" "$want_primary" "$(live_email)"
+    intent_refuses "$spec"
+    intent_recover
+  done
+
+  # The intent could not be written: nothing was changed, nothing is kept.
+  CS_ENV=(SHARKSWAP_TEST_SWITCH_FAULT=publish:fail)
+  cs work
+  CS_ENV=()
+  assert_rc "publish: a switch that cannot record its intent fails" 1
+  assert_err_has "publish: and says nothing changed" "could not record account switch intent; live identity was not changed"
+  assert_eq "publish: the login is the old one" "$(fake_token 2)" "$(live_token)"
+  assert_eq "publish: and so is the configuration" "bob@example.com" "$(live_email)"
+  assert_no_file "publish: the lock is not kept" "$lock"
+  assert_eq "publish: no backup is left" "0" "$(find "$H" -name '*.backup.*' -o -name '*.switch-backup.*' | wc -l | tr -d ' ')"
+  cs status
+  assert_rc "publish: nothing is refused afterwards" 0
+
+  # The switch landed but its intent could not be removed: the account is the
+  # new one, and still nothing trusts it until a person has looked.
+  CS_ENV=(SHARKSWAP_TEST_SWITCH_FAULT=clear:fail)
+  cs work
+  CS_ENV=()
+  assert_rc "clear: a switch whose intent stays fails" 1
+  assert_err_has "clear: and says so" "account switch completed but its intent could not be cleared"
+  assert_err_has "clear: with the lock kept" "identity lock retained at $lock for inspection"
+  assert_eq "clear: the switch itself landed" "alice@example.com" "$(live_email)"
+  assert_file "clear: the intent stays" "$marker"
+  intent_refuses "clear"
+  intent_recover
+
+  # A commit that fails and is put back in full: nothing stays.
+  CS_ENV=(SHARKSWAP_TEST_SWITCH_FAULT=secondary:fail)
+  cs work
+  CS_ENV=()
+  assert_rc "rollback: a failed commit fails the switch" 1
+  assert_err_has "rollback: and says it was put back" "switch commit failed; restored prior state where possible"
+  assert_eq "rollback: the primary configuration is the old one" "bob@example.com" "$(live_email)"
+  assert_eq "rollback: so is the second copy" "bob@example.com" "$(jq -r .oauthAccount.emailAddress "$H/.claude/.claude.json")"
+  assert_eq "rollback: and the token" "$(fake_token 2)" "$(live_token)"
+  assert_no_file "rollback: the intent and the lock are gone" "$lock"
+  assert_eq "rollback: no backup is left" "0" "$(find "$H" -name '*.backup.*' -o -name '*.switch-backup.*' | wc -l | tr -d ' ')"
+  cs status
+  assert_rc "rollback: nothing is refused afterwards" 0
+
+  # Put back in full, but the intent cannot be removed: the backups stay too.
+  CS_ENV=(SHARKSWAP_TEST_SWITCH_FAULT=secondary:fail,clear:fail)
+  cs work
+  CS_ENV=()
+  assert_rc "rollback+clear: the switch fails" 1
+  assert_err_has "rollback+clear: and says what stayed" "prior identity restored but switch intent could not be cleared; backups retained for inspection"
+  assert_eq "rollback+clear: the old login is back" "bob@example.com" "$(live_email)"
+  assert_file "rollback+clear: the intent stays" "$marker"
+  assert_eq "rollback+clear: with the backups" "2" "$(find "$H" -name '*.backup.*' | wc -l | tr -d ' ')"
+  intent_refuses "rollback+clear"
+  intent_recover
+
+  # The commit fails and the put-back fails too: a torn pair, and the intent says so.
+  CS_ENV=(SHARKSWAP_TEST_SWITCH_FAULT=secondary:fail,rollback:fail)
+  cs work
+  CS_ENV=()
+  assert_rc "no rollback: the switch fails" 1
+  assert_err_has "no rollback: and says the login was not put back" "the previous login was NOT restored"
+  assert_err_has "no rollback: and where the copies are" "a copy of the previous file is kept at"
+  assert_err_has "no rollback: with the lock kept" "identity lock retained at $lock for inspection"
+  assert_eq "no rollback: the token was put back" "$(fake_token 2)" "$(live_token)"
+  assert_eq "no rollback: the configuration was not" "alice@example.com" "$(live_email)"
+  assert_file "no rollback: the intent stays" "$marker"
+  intent_refuses "no rollback"
+  intent_recover
+
+  # The marker is looked at, never opened: a directory, a dangling link, a named
+  # pipe (opening it for reading would wait for a writer) all count.
+  mkdir -p "$lock"
+  local kind
+  for kind in empty directory dangling fifo; do
+    rm -rf "${lock:?}/switch-pending"
+    case "$kind" in
+      empty) : > "$marker" ;;
+      directory) mkdir "$marker" ;;
+      dangling) ln -s "$W/nowhere" "$marker" ;;
+      fifo) mkfifo "$marker" ;;
+    esac
+    CS_WRAP=()
+    command -v timeout >/dev/null 2>&1 && CS_WRAP=(timeout 20)
+    cs bar
+    assert_rc "a $kind marker: bar returns" 0
+    assert_out_has "a $kind marker: and infers no account" "no account"
+    cs bar work
+    assert_out_has "a $kind marker: a named account is still shown" "work"
+    CS_ENV=(CLAUDE_CONFIG_DIR="$H/.sharkswap/homes/work")
+    cs bar
+    assert_out_has "a $kind marker: so is an isolated home's account" "work"
+    CS_ENV=()
+    cs status
+    assert_rc "a $kind marker: status refuses" 1
+    CS_WRAP=()
+  done
+  rm -rf "${lock:?}"
+}
+
+# A rotation whose own switch is cut short must not write down a switch or a
+# failure: a cooldown for a move nobody can vouch for would hold the next real
+# one back.
+s_switch_intent_rotate() {
+  section "rotate with an interrupted switch"
+  new_world intent_rotate
+  save_as work alice@example.com 1
+  save_as personal bob@example.com 2
+  stub_start
+  stub_route 1 work 429 "$(rl_headers 1.0 0.40 rejected allowed)"
+  stub_route 2 personal 200 "$(rl_headers 0.10 0.20)"
+  cs work
+  mkdir -p "$W/config/sharkswap"
+  printf 'personal\nwork\n' > "$W/config/sharkswap/pool"
+  local log="$W/state/sharkswap-rotate.log" st="$W/state/sharkswap-rotate.json"
+  local lock="$H/.sharkswap/.identity.lock"
+
+  CS_ENV=(SHARKSWAP_TEST_SWITCH_FAULT=creds:TERM)
+  cs rotate
+  CS_ENV=()
+  assert_rc "the rotation fails" 1
+  assert_err_has "and names the target" "unfinished account switch to personal"
+  assert_file "the child's intent stays" "$lock/switch-pending"
+  assert_eq "the log has the error" "1" "$(grep -c 'ERROR: unfinished account switch to personal' "$log" || true)"
+  assert_eq "and does not call the switch unverified" "0" "$(grep -c 'NOT verified' "$log" || true)"
+  assert_eq "or say that the host moved" "0" "$(grep -c 'the host moved' "$log" || true)"
+  assert_eq "no switch is recorded" "null" "$(jq -c '.last_switch' "$st")"
+  assert_eq "and no failure" "null" "$(jq -c '.failed' "$st")"
+  assert_eq "the reading taken before the switch is kept" "work" "$(jq -r '.last_reading.alias' "$st")"
+  cs rotate --dry-run
+  assert_rc "a dry run refuses too" 1
+
+  # A person looks, clears the lock and puts the login back. The next rotation
+  # is not held back by a cooldown the cut-short switch never earned.
+  rm -rf "${lock:?}"
+  find "$H" -name '*.backup.*' -delete
+  find "$H/.claude" -name '*.switch-backup.*' -delete
+  cs work
+  assert_rc "an explicit switch works after the lock is cleared" 0
+  cs rotate
+  assert_rc "the rotation then runs" 0
+  assert_eq "and moves off the refused account at once" "bob@example.com" "$(live_email)"
+  stub_stop
 }
 
 s_pane() {
@@ -982,7 +1228,7 @@ s_fifo_store() {
   stub_stop
 }
 
-for scenario in s_save_and_list s_switch s_keychain_path s_pane s_token s_probe s_gate s_best_and_bar s_rotate s_rotate_notes s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
+for scenario in s_save_and_list s_switch s_keychain_path s_switch_intent s_switch_intent_rotate s_pane s_token s_probe s_gate s_best_and_bar s_rotate s_rotate_notes s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
   "$scenario"
 done
 summary

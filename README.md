@@ -243,6 +243,7 @@ Everything lives under `~/.sharkswap/` (directory mode 0700, files 0600, `umask 
 | `homes/<alias>/` | The config directory `cs pane` hands to a parallel terminal. |
 | `availability.json` | The latest probe reading per alias. |
 | `account-caps.json` | Your ceilings. |
+| `.identity.lock/` | Held while a switch, save or remove runs. After an interrupted switch it stays and holds `switch-pending` (see below). |
 
 Tokens are plain files protected by file permissions only. They are not encrypted. Do
 not put the directory in a synced folder or a backup you do not control.
@@ -287,6 +288,67 @@ new one, never half of it. If `~/.claude.json`, `~/.claude/.claude.json` or
 rotation) replaces the link with a regular file; the file the link pointed to is left
 as it was. This is how the original bash version behaves too. Keep them regular files,
 or put the link back after a switch.
+
+## An interrupted switch
+
+A global switch changes up to three live files one after the other: the credentials
+(the Keychain item on a Mac that keeps its login there, otherwise
+`~/.claude/.credentials.json`), then `~/.claude.json`, then `~/.claude/.claude.json`.
+No system call makes them one step, so a signal, a crash or a failed write between
+them can leave the token of one account beside the display block of another.
+
+Before the first of them changes, `cs` writes `~/.sharkswap/.identity.lock/switch-pending`
+(mode 0600, the alias being switched to and nothing secret). It removes the file only
+when every write has landed, or when every file has been put back after a failure. If
+the run is stopped, or a write or a put-back fails, the file stays and so does the
+identity lock directory it is in. This is the fail-closed state: nobody knows which
+account the live login is.
+
+While `switch-pending` exists:
+
+- `cs status`, `cs` (the overview), `cs <alias>`, `cs next`, `cs best --switch`, `cs rotate`
+  (also with `--dry-run`), `cs save`, `cs remove`, `cs pane`, the autosave of `cs watch`
+  and the availability record of `cs probe` all refuse. They print "unfinished account
+  switch" and name the lock directory, at once and not after waiting for the lock to
+  time out.
+- `cs list` still shows the saved accounts but marks none of them active, and `cs best`
+  ranks them as before.
+- `cs bar` with no alias prints `sharkswap: no account` instead of inferring one from
+  the live files. `cs bar <alias>`, and `cs bar` run inside a pane (a `CLAUDE_CONFIG_DIR`
+  under `~/.sharkswap/homes/`), are not about the live login and still work.
+- A rotation whose own switch was cut short stops with an error. It does not record a
+  switch or a failure, so the next run is not held back by a cooldown the switch never
+  earned.
+
+Only the existence of the file is checked. It is looked at with `lstat` and never
+opened or read, so an empty file, a directory, a dangling link or a named pipe in its
+place counts the same, and the status-line command `cs bar` cannot block on it.
+
+There is no command that clears the state, on purpose: a person has to look first.
+
+1. Stop whatever uses the global login: the rotation timer, `cs watch`, running
+   `claude` sessions.
+2. Look. `~/.sharkswap/.identity.lock/switch-pending` names the alias the switch was
+   going to; `owner` names the process that held the lock. A switch that failed after
+   it had changed something leaves copies of the previous files next to the live ones
+   (`~/.claude.json.backup.*`, `~/.claude/.claude.json.backup.*`,
+   `~/.claude/.credentials.json.switch-backup.*`, and on a Mac
+   `~/.sharkswap/keychain-prior-login.*`); the error names them. Keep them until you
+   are sure which login you want.
+3. Remove the abandoned lock: `rm -rf ~/.sharkswap/.identity.lock`.
+4. Switch explicitly to an account you know is saved: `cs <alias>`. That rewrites all
+   three files. If none is saved, run `/login` in Claude Code instead.
+5. Check with `cs status`, then start the timer, `cs watch` and your sessions again.
+
+Do not run `cs save` or `cs watch` to capture the login while it is uncertain: that
+would store the mixed pair under an alias.
+
+The guard covers interruptions that `cs` can see: a signal it handles, a write that
+fails, a put-back that fails. It is not atomic against a power cut or a kill that comes
+at the wrong instant, and it does not stop a program other than `cs` (Claude Code's own
+`/login`) from writing the same files. A credentials write that fails also keeps the
+marker, even when nothing was changed (a locked Keychain, say), because `cs` cannot
+tell. Nothing recovers by itself.
 
 ## Usage probe
 
@@ -389,6 +451,7 @@ Each is read only when `SHARKSWAP_TEST_HOOKS=1` is also set:
 | `SHARKSWAP_NOW` | The instant, in epoch seconds, at which every availability judgement is made. |
 | `SHARKSWAP_LOCK_ATTEMPTS` | How many times the identity lock is tried (default 50). |
 | `SHARKSWAP_LOCK_DELAY` | Seconds between those tries (default 0.1). |
+| `SHARKSWAP_TEST_SWITCH_FAULT` | Comma-separated `point:action`. Interrupts a switch at `publish`, `intent`, `creds`, `primary`, `secondary`, `rollback` or `clear`: `TERM` and `KILL` make the process signal itself there, `fail` makes that step report an error. |
 
 The Keychain write is also tested against the real `security` tool, by two unit tests
 that are ignored by default and run in the macOS CI job: `cargo test --locked --
@@ -412,6 +475,8 @@ any other keychain. The hooks are for tests, not settings; do not set them.
 - The probe spends one token of the account's allowance per request.
 - The switch is global to the machine: it changes the login every new `claude` session
   uses. Use `cs pane` for per-terminal accounts.
+- An interrupted switch is detected, not repaired: see "An interrupted switch" for what
+  `cs` refuses until you have looked and cleared the lock yourself.
 - Usage figures come from headers that can read a few points above the usage page.
 - No Windows support.
 
