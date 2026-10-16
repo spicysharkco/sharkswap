@@ -160,6 +160,16 @@ cs() {
   OUT="$(cat "$W/out.txt")"; ERR="$(cat "$W/err.txt")"
 }
 
+# cs_limit ARGS...: like cs, but SIGALRM ends the binary after 20 seconds (RC 142),
+# so a read that blocks on a FIFO fails a check instead of hanging the suite. perl
+# is used because timeout(1) is not on every system the suite runs on.
+cs_limit() {
+  local wrap=(${CS_WRAP[@]+"${CS_WRAP[@]}"})
+  CS_WRAP=(perl -e 'alarm 20; exec @ARGV')
+  cs "$@"
+  CS_WRAP=(${wrap[@]+"${wrap[@]}"})
+}
+
 # cs_tty ARGS...: like cs, but with standard input, output and error on a
 # terminal (a pseudo-terminal made by script(1)). Sets OUT to what the terminal
 # showed and RC to the exit status. Returns 1, setting nothing, when no terminal

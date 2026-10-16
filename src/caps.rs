@@ -648,7 +648,9 @@ pub fn holders(store: &Path, alias: &str, email: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{H, NOW, TestStore, meta, reading, reading_at};
+    use crate::testkit::{
+        H, NOW, TestStore, make_fifo, meta, reading, reading_at, within_deadline,
+    };
     use crate::util::wall_ms;
     use serde_json::json;
 
@@ -663,6 +665,29 @@ mod tests {
 
     fn table(entries: &[(&str, Ceiling)]) -> Caps {
         Caps(entries.iter().map(|(k, c)| (k.to_string(), *c)).collect())
+    }
+
+    #[test]
+    fn read_caps_with_a_fifo_at_the_file_is_an_unusable_policy_not_a_hang() {
+        let dir = TestStore::new(&[]);
+        let file = dir.join("account-caps.json");
+        make_fifo(&file);
+        let store = dir.to_path_buf();
+        let c = within_deadline(&file, move || read_caps(&store));
+        let unusable = c.unusable.expect("a FIFO is not a ceiling table");
+        assert_eq!(unusable.why, "is unreadable");
+        assert!(c.caps.is_empty());
+    }
+
+    #[test]
+    fn read_caps_with_a_dangling_link_at_the_file_is_unusable_not_missing() {
+        let dir = TestStore::new(&[]);
+        std::os::unix::fs::symlink("nowhere.json", dir.join("account-caps.json")).expect("link");
+        let c = read_caps(&dir);
+        assert_eq!(
+            c.unusable.expect("present but unusable").why,
+            "is unreadable"
+        );
     }
 
     #[test]

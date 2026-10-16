@@ -333,7 +333,9 @@ pub fn fmt_age(ms: Option<f64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{H, NOW, TestStore, avail, meta, reading, reading_at, sec};
+    use crate::testkit::{
+        H, NOW, TestStore, avail, make_fifo, meta, reading, reading_at, sec, within_deadline,
+    };
     use serde_json::json;
 
     const DAY: f64 = 24.0 * H;
@@ -346,6 +348,21 @@ mod tests {
         assert_eq!(probe_max_age_ms("0"), 0.0);
         assert_eq!(probe_max_age_ms("soon"), 24.0 * H);
         assert_eq!(probe_max_age_ms("-3"), 24.0 * H);
+    }
+
+    #[test]
+    fn availability_and_account_readers_pass_over_a_fifo_instead_of_hanging() {
+        let dir = TestStore::new(&[("work.json", meta("work@example.com"))]);
+        let file = dir.join("availability.json");
+        make_fifo(&file);
+        let store = dir.to_path_buf();
+        assert!(within_deadline(&file, move || read_availability(&store)).is_empty());
+        let file = dir.join("broken.json");
+        make_fifo(&file);
+        let store = dir.to_path_buf();
+        let emails = within_deadline(&file, move || alias_emails(&store));
+        assert_eq!(emails.get("work"), Some("work@example.com"));
+        assert_eq!(emails.get("broken"), None);
     }
 
     #[test]

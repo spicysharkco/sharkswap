@@ -139,9 +139,78 @@ pub fn mtime_ms(path: &Path) -> Option<f64> {
     Some(d.as_secs() as f64 * 1000.0 + f64::from(d.subsec_nanos()) / 1e6)
 }
 
+/// The most a store, state, credentials, token, pool or config file may hold when
+/// it is read. It bounds memory, not meaning: every real file here is a few
+/// kilobytes, except the Claude config (`~/.claude.json`), which Claude Code
+/// itself grows with history, so the cap sits well above any plausible size.
+pub const MAX_STORE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn unusable(why: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, why.to_string())
+}
+
+/// Opens `path` for reading without ever blocking, and answers for the open
+/// handle: it must be a regular file of at most `cap` bytes. A FIFO with no
+/// writer blocks a plain open for good, so the file is opened `O_NONBLOCK` first
+/// and only then asked what it is (fstat, not a stat of the path, which would
+/// leave a gap for a swap in between). A FIFO, a directory, a device or an
+/// oversize file is an `InvalidData` error, like a corrupt file. Only a path with
+/// no entry at all is `NotFound`: a dangling symlink is present but unusable.
+fn open_regular(path: &Path, cap: u64) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path);
+    let file = match file {
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && !std::fs::symlink_metadata(path)
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Err(unusable("a dangling symbolic link"));
+        }
+        other => other?,
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(unusable("not a regular file"));
+    }
+    if meta.len() > cap {
+        return Err(unusable("larger than the size cap"));
+    }
+    Ok(file)
+}
+
+/// The rest of an open file, stopping one byte past `cap`: the size `open_regular`
+/// saw is only a hint, because a file can grow after the check.
+fn read_to_cap(file: std::fs::File, cap: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.take(cap + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > cap {
+        return Err(unusable("larger than the size cap"));
+    }
+    Ok(bytes)
+}
+
+/// A store, state, credentials, token, pool or config file as it is, read without
+/// blocking and under `MAX_STORE_BYTES`. An error other than `NotFound` means the
+/// path holds something that is not a usable file; callers treat it as corrupt.
+pub fn read_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    read_to_cap(open_regular(path, MAX_STORE_BYTES)?, MAX_STORE_BYTES)
+}
+
+/// The open handle `read_bytes` reads from, for a caller that needs the file
+/// itself: opened and checked the same way.
+pub fn open_store_file(path: &Path) -> std::io::Result<std::fs::File> {
+    open_regular(path, MAX_STORE_BYTES)
+}
+
 /// Whole file as text; bytes that are not UTF-8 become U+FFFD instead of an error.
+/// Read like `read_bytes`.
 pub fn read_text(path: &Path) -> std::io::Result<String> {
-    Ok(String::from_utf8_lossy(&std::fs::read(path)?).into_owned())
+    Ok(String::from_utf8_lossy(&read_bytes(path)?).into_owned())
 }
 
 pub fn read_json(path: &Path) -> Option<Value> {
@@ -361,8 +430,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()>
 /// before any byte is written, so a backup of a token file never ends up more
 /// readable than the store, not even briefly.
 pub fn copy_p(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::io::Read;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mut input = std::fs::File::open(src)?;
+    let input = open_store_file(src)?;
     let mut out = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -370,7 +440,9 @@ pub fn copy_p(src: &Path, dst: &Path) -> std::io::Result<()> {
         .mode(0o600)
         .open(dst)?;
     out.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    std::io::copy(&mut input, &mut out)?;
+    if std::io::copy(&mut (&input).take(MAX_STORE_BYTES + 1), &mut out)? > MAX_STORE_BYTES {
+        return Err(unusable("larger than the size cap"));
+    }
     if let Ok(m) = input.metadata().and_then(|m| m.modified()) {
         out.set_modified(m)?;
     }
@@ -445,7 +517,8 @@ pub fn rm_f(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{TestStore, disposition, signal_lock};
+    use crate::testkit::{TestStore, disposition, make_fifo, signal_lock, within_deadline};
+    use std::io::ErrorKind;
     #[cfg(not(target_os = "macos"))]
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -568,6 +641,123 @@ mod tests {
                 .starts_with(prefix.as_os_str().as_bytes())
         );
         assert_eq!(mode(&made), 0o600);
+    }
+
+    /// `read_bytes` on a thread with a deadline: a regression that blocks on the
+    /// FIFO at `path` fails the test instead of hanging it.
+    fn read_bytes_in_time(path: &Path) -> std::io::Result<Vec<u8>> {
+        let owned = path.to_path_buf();
+        within_deadline(path, move || read_bytes(&owned))
+    }
+
+    #[test]
+    fn a_fifo_at_the_path_is_unusable_at_once_not_a_hang() {
+        let dir = TestStore::new(&[]);
+        let fifo = dir.join("availability.json");
+        make_fifo(&fifo);
+        let err = read_bytes_in_time(&fifo).expect_err("a FIFO is not a store file");
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn text_json_and_copy_readers_fail_on_a_fifo_like_on_a_corrupt_file() {
+        let dir = TestStore::new(&[]);
+        let fifo = dir.join("work.json");
+        let copy = dir.join("work.json.bak");
+        make_fifo(&fifo);
+        let (f, c) = (fifo.clone(), copy.clone());
+        let (text, json, last, copied) = within_deadline(&fifo, move || {
+            (
+                read_text(&f),
+                read_json(&f),
+                read_last_json(&f),
+                copy_p(&f, &c),
+            )
+        });
+        assert_eq!(text.expect_err("text").kind(), ErrorKind::InvalidData);
+        assert!(json.is_none());
+        assert!(last.is_none());
+        assert_eq!(copied.expect_err("copy").kind(), ErrorKind::InvalidData);
+        assert!(
+            !copy.exists(),
+            "nothing is created for a source that cannot be read"
+        );
+    }
+
+    #[test]
+    fn only_a_path_with_no_entry_is_missing() {
+        let dir = TestStore::new(&[]);
+        let gone = dir.join("gone.json");
+        assert_eq!(
+            read_bytes_in_time(&gone).expect_err("missing").kind(),
+            ErrorKind::NotFound
+        );
+        let dangling = dir.join("dangling.json");
+        std::os::unix::fs::symlink("gone.json", &dangling).expect("symlink");
+        assert_eq!(
+            read_bytes_in_time(&dangling).expect_err("dangling").kind(),
+            ErrorKind::InvalidData,
+            "a dangling symlink is present but unusable"
+        );
+        let sub = dir.join("sub.json");
+        std::fs::create_dir(&sub).expect("mkdir");
+        assert_eq!(
+            read_bytes_in_time(&sub).expect_err("directory").kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn a_regular_file_and_a_symlink_to_one_read_back_whole() {
+        let dir = TestStore::new(&[]);
+        let path = dir.join("a.json");
+        std::fs::write(&path, b"{\"k\": 1}\n").expect("write");
+        let link = dir.join("b.json");
+        std::os::unix::fs::symlink("a.json", &link).expect("symlink");
+        assert_eq!(read_bytes_in_time(&path).expect("read"), b"{\"k\": 1}\n");
+        assert_eq!(read_bytes_in_time(&link).expect("read"), b"{\"k\": 1}\n");
+        assert_eq!(read_text(&path).expect("text"), "{\"k\": 1}\n");
+        let empty = dir.join("empty.json");
+        std::fs::write(&empty, b"").expect("write");
+        assert_eq!(read_bytes_in_time(&empty).expect("read"), b"");
+    }
+
+    #[test]
+    fn the_cap_is_on_bytes_so_exactly_the_cap_passes_and_one_more_does_not() {
+        let dir = TestStore::new(&[]);
+        let path = dir.join("a.json");
+        std::fs::write(&path, b"12345678").expect("write");
+        let read = open_regular(&path, 8).and_then(|file| read_to_cap(file, 8));
+        assert_eq!(read.expect("exactly the cap"), b"12345678");
+        let err = open_regular(&path, 7).expect_err("one byte over the cap");
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_file_that_grows_after_the_size_check_still_cannot_pass_the_cap() {
+        let dir = TestStore::new(&[]);
+        let path = dir.join("a.json");
+        std::fs::write(&path, b"1234").expect("write");
+        let file = open_regular(&path, 4).expect("4 bytes pass a cap of 4");
+        let mut grow = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        std::io::Write::write_all(&mut grow, b"5678").expect("grow");
+        let err = read_to_cap(file, 4).expect_err("the read stops past the cap");
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_file_over_the_real_cap_is_refused_before_a_byte_is_read() {
+        let dir = TestStore::new(&[]);
+        let path = dir.join("big.json");
+        std::fs::File::create(&path)
+            .expect("create")
+            .set_len(MAX_STORE_BYTES + 1)
+            .expect("a sparse file");
+        let err = read_bytes_in_time(&path).expect_err("over the cap");
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
     }
 
     extern "C" fn marker(_: libc::c_int) {}

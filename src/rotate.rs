@@ -1471,7 +1471,7 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
     };
 
     let pool = pool_words(ctx, &run, &pool_file);
-    if File::open(&pool_file).is_err() {
+    if open_store_file(Path::new(&pool_file)).is_err() {
         run.error(&format!(
             "pool file {pool_file} not found; the pool is empty"
         ));
@@ -1798,6 +1798,16 @@ mod tests {
     use serde_json::json;
 
     const T0: f64 = NOW / 1000.0;
+
+    #[test]
+    fn a_fifo_at_the_state_file_reads_as_no_state_not_a_hang() {
+        let dir = crate::testkit::TestStore::new(&[]);
+        let file = dir.join("sharkswap-rotate.json");
+        crate::testkit::make_fifo(&file);
+        let path = file.clone();
+        let state = crate::testkit::within_deadline(&file, move || state_map(&path));
+        assert!(state.is_empty());
+    }
 
     fn open(five: f64, week: f64) -> Reading {
         Reading {

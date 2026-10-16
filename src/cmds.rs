@@ -1143,7 +1143,7 @@ pub fn cmd_watch(ctx: &Ctx, args: &[String]) -> Res {
     let every = interval("10");
     let mut last: Option<Vec<u8>> = None;
     loop {
-        let mut cur = std::fs::read(&target).unwrap_or_default();
+        let mut cur = read_bytes(&target).unwrap_or_default();
         if let Some(i) = cur.iter().position(|&b| b == 0) {
             cur.truncate(i);
         }

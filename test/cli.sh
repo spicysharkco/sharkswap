@@ -795,7 +795,88 @@ s_symlinked_store() {
   CS_ENV=()
 }
 
-for scenario in s_save_and_list s_switch s_keychain_path s_pane s_token s_probe s_gate s_best_and_bar s_rotate s_remove s_overview_and_status s_symlinked_store s_install s_contained s_help_and_dispatch; do
+# A FIFO planted where a store, state, pool or config file belongs: a plain open
+# for reading would wait for a writer for good. Each reader must treat it like a
+# corrupt file, so the command answers and exits (cs_limit ends one that waits,
+# with RC 142).
+s_fifo_store() {
+  section "a FIFO in place of a store file"
+  new_world fifo
+  save_as alpha a@example.com 1
+  save_as bravo b@example.com 2
+  stub_start
+  stub_route 1 alpha 200 "$(rl_headers 0.10 0.20)"
+  stub_route 2 bravo 200 "$(rl_headers 0.50 0.60)"
+  cs probe
+  local store="$H/.sharkswap" fifo
+  # fifo_over FILE: move FILE aside (if there) and put a FIFO in its place.
+  fifo_over() { fifo="$1"; if [[ -e "$fifo" ]]; then mv "$fifo" "$fifo.real"; fi; mkfifo "$fifo"; }
+  # fifo_back: take the FIFO away and put the real file back.
+  fifo_back() { rm -f "$fifo"; if [[ -e "$fifo.real" ]]; then mv "$fifo.real" "$fifo"; fi; }
+
+  fifo_over "$store/availability.json"
+  cs_limit bar alpha
+  assert_rc "bar with a FIFO as the availability cache" 0
+  assert_out_has "the FIFO reads as no reading" "no reading"
+  cs_limit best --raw
+  assert_rc "best with a FIFO as the availability cache" 0
+  assert_eq "and ranks the accounts with no reading" "alpha bravo " "$(cut -f1 <<<"$OUT" | sort | tr '\n' ' ')"
+  fifo_back
+
+  fifo_over "$store/account-caps.json"
+  cs_limit best --raw
+  assert_rc "best with a FIFO as the ceiling table" 1
+  assert_err_has "the table is unusable, not missing" "account-caps.json is unreadable"
+  assert_err_has "and nothing is ranked" "refusing to rank accounts"
+  fifo_back
+
+  fifo_over "$store/bravo.creds.json"
+  cs_limit best --raw
+  assert_rc "best with a FIFO as a login snapshot" 0
+  fifo_back
+  fifo_over "$store/alpha.creds.json"
+  cs_limit bar alpha
+  assert_rc "bar with a FIFO as the login snapshot" 0
+  assert_out_has "and the reading still shows" "alpha"
+  fifo_back
+
+  fifo_over "$store/bravo.json"
+  cs_limit list
+  assert_rc "list with a FIFO as an account's metadata" 0
+  assert_out_has "the account is still listed" "bravo"
+  fifo_back
+
+  fifo_over "$H/.claude.json"
+  cs_limit status
+  assert_rc "status with a FIFO as the Claude config" 0
+  assert_out_has "no email is read from it" "Active email : (none)"
+  fifo_back
+
+  mkdir -p "$store/tokens"
+  fifo_over "$store/tokens/alpha.json"
+  cs_limit probe alpha
+  assert_rc "probe with a FIFO as the one-year token file" 0
+  fifo_back
+  rm -f "$store/tokens/alpha.json"
+
+  mkdir -p "$W/config/sharkswap"
+  fifo_over "$W/config/sharkswap/pool"
+  cs_limit rotate --dry-run
+  assert_rc "rotate with a FIFO as the pool file" 0
+  assert_err_has "the pool counts as empty" "the pool is empty"
+  fifo_back
+  printf 'alpha\nbravo\n' > "$W/config/sharkswap/pool"
+  fifo_over "$W/state/sharkswap-rotate.json"
+  cs_limit rotate --dry-run
+  assert_rc "rotate with a FIFO as the state file" 0
+  fifo_back
+
+  # Nothing was left behind in the sandbox that a reader could still wait on.
+  assert_eq "no FIFO is left in the sandbox" "0" "$(find "$W" -type p | wc -l | tr -d ' ')"
+  stub_stop
+}
+
+for scenario in s_save_and_list s_switch s_keychain_path s_pane s_token s_probe s_gate s_best_and_bar s_rotate s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
   "$scenario"
 done
 summary

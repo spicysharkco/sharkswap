@@ -119,3 +119,41 @@ pub fn reading(util5: f64, util7: f64) -> Value {
 pub fn avail(v: Value) -> Avail {
     v.as_object().expect("an object").clone()
 }
+
+/// A FIFO at `path`. Nothing writes to it, so a plain open for reading blocks
+/// for good.
+pub fn make_fifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a path without NUL");
+    // SAFETY: `c` is a valid NUL-terminated path for the whole call.
+    assert_eq!(
+        unsafe { libc::mkfifo(c.as_ptr(), 0o600) },
+        0,
+        "mkfifo failed"
+    );
+}
+
+/// Runs `f` on a thread and waits for it at most 10 s, so a reader that blocks
+/// on the FIFO at `fifo` fails its test instead of hanging the suite. On a
+/// timeout the FIFO is opened for reading and writing, which lets a reader
+/// stuck in `open` go on and see end of file, and then the test panics: no
+/// thread is left blocked on a file outside the test's temp directory.
+pub fn within_deadline<T: Send + 'static>(
+    fifo: &Path,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(f());
+    });
+    match receiver.recv_timeout(Duration::from_secs(10)) {
+        Ok(value) => value,
+        Err(_) => {
+            let _ = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(fifo);
+            panic!("the read blocked on the FIFO at {}", fifo.display());
+        }
+    }
+}
