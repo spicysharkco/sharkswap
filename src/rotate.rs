@@ -864,7 +864,9 @@ fn reading_json(r: &Reading, key: &str, now: f64) -> Value {
 
 /// A run that read the account files its reading (and the host burn rate measured
 /// against the previous one); a run that did not counts one more unreadable run
-/// for it.
+/// for it. `notes` are the notes the run logged: kept in the file in the
+/// decision's order, the key absent when there are none; None leaves them as they
+/// were (the log could not take them).
 fn remember(
     path: &Path,
     key: &str,
@@ -872,6 +874,7 @@ fn remember(
     now: f64,
     tick: f64,
     caps: &Caps,
+    notes: Option<&[String]>,
 ) -> Result<(), String> {
     let mut next = state_map(path);
     let last = parse_last(next.get("last_reading"));
@@ -906,7 +909,49 @@ fn remember(
         o.insert("n".into(), json_number(n));
         next.insert("unreadable".into(), Value::Object(o));
     }
+    match notes {
+        Some([]) => {
+            next.shift_remove("notes");
+        }
+        Some(list) => {
+            let list = list.iter().cloned().map(Value::String).collect();
+            next.insert("notes".into(), Value::Array(list));
+        }
+        None => {}
+    }
     write_state(path, next)
+}
+
+/// The notes the last real run logged, as the state file keeps them. A file from
+/// before the key, or no file, remembers none.
+fn remembered_notes(st: &Map<String, Value>) -> Vec<String> {
+    match st.get("notes") {
+        Some(Value::Array(list)) => list
+            .iter()
+            .filter_map(|n| n.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The log lines for this run's notes against the ones the last real run logged:
+/// `note: ...` for a note that is new, then `note ended: ...` for a remembered one
+/// that is gone. A note spanning several lines is a line each, the blank ones
+/// dropped. A standing note is logged when it begins and when it ends, not on
+/// every run.
+fn note_lines(now: &[String], was: &[String]) -> Vec<String> {
+    let pieces = |prefix: &str, notes: &[String], not_in: &[String]| -> Vec<String> {
+        notes
+            .iter()
+            .filter(|n| !not_in.contains(n))
+            .flat_map(|n| n.split('\n'))
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| format!("{prefix}{l}"))
+            .collect()
+    };
+    let mut out = pieces("note: ", now, was);
+    out.extend(pieces("note ended: ", was, now));
+    out
 }
 
 /// `switched` (the host moved) or `failed` (a switch to `alias` did not take).
@@ -1081,9 +1126,11 @@ struct Run {
 
 impl Run {
     /// One decision line, several when the text has several. A dry run prints it
-    /// and a real run appends it to the log, timestamped.
-    fn log(&self, text: &str) {
+    /// and a real run appends it to the log, timestamped. False when a line could
+    /// not be written (said on stderr); the notes are remembered only if it is not.
+    fn log(&self, text: &str) -> bool {
         let ts = local_fmt(wall_secs(), "%F %T").unwrap_or_default();
+        let mut all = true;
         for line in text.split('\n') {
             if self.dry {
                 println!("{ts} {line}");
@@ -1103,8 +1150,10 @@ impl Run {
                     .is_ok();
             if !wrote {
                 eprintln!("sharkswap rotate: cannot write {}", self.log);
+                all = false;
             }
         }
+        all
     }
 
     /// A fault of the run itself (not a decision): on stderr for whoever runs it by
@@ -1488,10 +1537,12 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
     // account than on none.
     let cur = ctx.current_alias();
     let mut cur_rec: Option<Record> = None;
+    // Joins the caps table's notes below, so it is logged once like they are.
+    let mut login_note: Option<String> = None;
     if !cur.is_empty() {
         if live_login_dead(ctx, &cur, now_secs) {
-            run.log(&format!(
-                "note: {cur}: the host's login is not its one-year token and its refresh login has expired; counting the account as unreadable"
+            login_note = Some(format!(
+                "{cur}: the host's login is not its one-year token and its refresh login has expired; counting the account as unreadable"
             ));
             cur_rec = Some(Record::placeholder(false, false));
         } else {
@@ -1609,13 +1660,29 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
     }
 
     // The caps table's notes (a table that cannot be read refuses every account,
-    // so it is said in the log too, not only where nobody looks).
-    for note in &eff.notes {
+    // so it is said in the log too, not only where nobody looks), and the login
+    // note. stderr says every note on every run; a real run's log says one when it
+    // begins and when it ends, against the notes the last real run kept in the
+    // state file, for a standing note (a raise in force) would otherwise fill the
+    // log on every run and bury the switches. Without a usable ceiling policy the
+    // run returns below with the state alone, so it has nothing to compare with
+    // and logs every note, as it logs its ERROR line.
+    let mut notes = eff.notes.clone();
+    notes.extend(login_note);
+    for note in &notes {
         for line in note.split('\n') {
             eprintln!("sharkswap rotate: note: {line}");
-            if !dry {
-                run.log(&format!("note: {line}"));
-            }
+        }
+    }
+    let mut noted = true;
+    if !dry {
+        let was = if eff.unusable.is_none() {
+            remembered_notes(&st)
+        } else {
+            Vec::new()
+        };
+        for line in note_lines(&notes, &was) {
+            noted &= run.log(&line);
         }
     }
 
@@ -1645,6 +1712,9 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
                 now,
                 tick,
                 &eff.caps,
+                // A note the log did not take is not remembered, so the next run,
+                // with a log that works, says what is still owed.
+                noted.then_some(notes.as_slice()),
             )
         });
     }
@@ -2223,6 +2293,144 @@ mod tests {
         let mut aliases: Vec<&str> = m.iter().map(|(a, _)| a.as_str()).collect();
         aliases.sort_unstable();
         assert_eq!(aliases, ["a", "d"]);
+    }
+
+    #[test]
+    fn a_note_is_logged_when_it_begins_and_when_it_ends() {
+        let (a, b) = (
+            names(&["raise in force"]),
+            names(&["raise in force", "bad key"]),
+        );
+        assert_eq!(
+            note_lines(&b, &[]),
+            ["note: raise in force", "note: bad key"],
+            "nothing remembered: all begin, in the decision's order"
+        );
+        assert!(
+            note_lines(&b, &b).is_empty(),
+            "a standing note is not logged again"
+        );
+        assert_eq!(note_lines(&b, &a), ["note: bad key"], "only the new one");
+        assert_eq!(note_lines(&a, &b), ["note ended: bad key"]);
+        assert_eq!(
+            note_lines(&names(&["new"]), &names(&["old"])),
+            ["note: new", "note ended: old"],
+            "begun first, ended after"
+        );
+        assert_eq!(
+            note_lines(&a, &[]),
+            ["note: raise in force"],
+            "it came back"
+        );
+    }
+
+    #[test]
+    fn the_blank_pieces_of_a_multi_line_note_are_dropped() {
+        let note = names(&["first\n\n  \nsecond\n"]);
+        assert_eq!(note_lines(&note, &[]), ["note: first", "note: second"]);
+        assert_eq!(
+            note_lines(&[], &note),
+            ["note ended: first", "note ended: second"]
+        );
+        assert!(
+            note_lines(&names(&["\n \n"]), &[]).is_empty(),
+            "no bare 'note:'"
+        );
+    }
+
+    #[test]
+    fn the_remembered_notes_are_the_strings_of_a_list() {
+        let st = |v: serde_json::Value| v.as_object().cloned().unwrap_or_default();
+        assert_eq!(remembered_notes(&st(json!({}))), Vec::<String>::new());
+        assert_eq!(
+            remembered_notes(&st(json!({ "notes": "a" }))),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            remembered_notes(&st(json!({ "notes": ["a", 3, null, "b"] }))),
+            ["a", "b"]
+        );
+    }
+
+    #[test]
+    fn remember_keeps_the_notes_and_drops_the_key_when_there_are_none() {
+        let dir = crate::testkit::TestStore::new(&[]);
+        let path = dir.join("state.json");
+        let put = |notes: Option<&[String]>| {
+            remember(
+                &path,
+                "work",
+                Some(&open(0.1, 0.2)),
+                T0,
+                600.0,
+                &Caps::default(),
+                notes,
+            )
+            .expect("the state is written");
+            state_map(&path)
+        };
+        let list = names(&["b", "a"]);
+        assert_eq!(
+            remembered_notes(&put(Some(&list))),
+            ["b", "a"],
+            "in the decision's order"
+        );
+        assert_eq!(
+            remembered_notes(&put(None)),
+            ["b", "a"],
+            "None leaves them as they were"
+        );
+        let st = put(Some(&[]));
+        assert!(!st.contains_key("notes"), "no notes, no key");
+        assert!(
+            st.contains_key("last_reading"),
+            "the rest is written as before"
+        );
+        let st = put(None);
+        assert!(!st.contains_key("notes"), "None does not make the key");
+    }
+
+    #[test]
+    fn a_switch_mark_keeps_the_notes() {
+        let dir = crate::testkit::TestStore::new(&[]);
+        let path = dir.join("state.json");
+        let list = names(&["a"]);
+        remember(
+            &path,
+            "work",
+            None,
+            T0,
+            600.0,
+            &Caps::default(),
+            Some(&list),
+        )
+        .expect("written");
+        mark(&path, true, "personal", T0, 600.0).expect("switched");
+        mark(&path, false, "spare", T0, 600.0).expect("failed");
+        assert_eq!(remembered_notes(&state_map(&path)), ["a"]);
+    }
+
+    #[test]
+    fn a_log_line_that_cannot_be_written_is_said() {
+        let dir = crate::testkit::TestStore::new(&[]);
+        let log = dir.join("rotate.log");
+        let run = Run {
+            dry: false,
+            log: log.to_string_lossy().into_owned(),
+        };
+        assert!(run.log("note: a\nnote: b"), "a log that works");
+        let text = std::fs::read_to_string(&log).expect("the log");
+        assert_eq!(text.lines().count(), 2);
+        let run = Run {
+            dry: false,
+            log: dir.to_string_lossy().into_owned(),
+        };
+        assert!(!run.log("note: a"), "a directory cannot be the log");
+        let run = Run {
+            dry: true,
+            log: dir.to_string_lossy().into_owned(),
+        };
+        assert!(run.log("note: a"), "a dry run writes no log, so none fails");
     }
 
     fn reply(http: u16, limits: serde_json::Value) -> Reply {

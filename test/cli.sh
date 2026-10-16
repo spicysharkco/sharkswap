@@ -596,6 +596,112 @@ s_rotate() {
   stub_stop
 }
 
+# A note (here the caps table's) is logged when it begins and when it ends, not on
+# every run; stderr says it every time.
+s_rotate_notes() {
+  section "rotate notes"
+  new_world rotate-notes
+  save_as work alice@example.com 1
+  stub_start
+  stub_route 1 work 200 "$(rl_headers 0.10 0.20)"
+  mkdir -p "$W/config/sharkswap"
+  printf 'work\n' > "$W/config/sharkswap/pool"
+  local log="$W/state/sharkswap-rotate.log" st="$W/state/sharkswap-rotate.json"
+  local caps="$H/.sharkswap/account-caps.json"
+  printf '{"caps":{"bad key":{"5h":50},"also bad":{"5h":50}}}\n' > "$caps"
+
+  cs rotate --dry-run
+  assert_rc "dry run" 0
+  assert_err_has "a dry run says the notes on stderr" '"bad key" is not an alias'
+  assert_no_file "a dry run writes no log" "$log"
+  assert_no_file "and no state, so it remembers no notes" "$st"
+
+  cs rotate
+  assert_rc "first run" 0
+  assert_err_has "stderr says the note" '"bad key" is not an alias'
+  assert_eq "the log has each note once" "2" "$(grep -c ' note: .*is not an alias' "$log" || true)"
+  assert_eq "in the decision's order" '"bad key"' "$(grep ' note: ' "$log" | head -n 1 | sed -n 's/.*\("bad key"\).*/\1/p')"
+  assert_eq "state remembers both" "2" "$(jq '.notes | length' "$st")"
+  assert_eq "in that order" "true" "$(jq '.notes[0] | contains("bad key")' "$st")"
+  assert_eq "the state keeps the rest" "work" "$(jq -r .last_reading.alias "$st")"
+
+  local before; before="$(wc -l < "$log")"
+  cs rotate
+  assert_rc "second run" 0
+  assert_err_has "stderr still says the note on every run" '"bad key" is not an alias'
+  assert_err_has "and the other" '"also bad" is not an alias'
+  assert_eq "the log does not repeat the notes" "$before" "$(wc -l < "$log")"
+  assert_eq "state still remembers both" "2" "$(jq '.notes | length' "$st")"
+
+  cs rotate --dry-run
+  assert_eq "a dry run adds nothing to the log" "$before" "$(wc -l < "$log")"
+  assert_eq "and leaves the memory alone" "2" "$(jq '.notes | length' "$st")"
+
+  printf '{"caps":{"bad key":{"5h":50}}}\n' > "$caps"
+  cs rotate
+  assert_eq "a note that went away is logged as ended, once" "1" "$(grep -c ' note ended: .*"also bad"' "$log" || true)"
+  assert_eq "and nothing else ended" "1" "$(grep -c ' note ended: ' "$log" || true)"
+  assert_eq "no note is logged again" "2" "$(grep -c ' note: ' "$log" || true)"
+  assert_eq "state remembers the one that stands" "1" "$(jq '.notes | length' "$st")"
+  cs rotate
+  assert_eq "an ended note is said once" "1" "$(grep -c ' note ended: ' "$log" || true)"
+
+  rm -f "$caps"
+  cs rotate
+  assert_eq "the last note ends" "2" "$(grep -c ' note ended: ' "$log" || true)"
+  assert_eq "with no notes the key is absent" "false" "$(jq 'has("notes")' "$st")"
+
+  printf '{"caps":{"bad key":{"5h":50}}}\n' > "$caps"
+  cs rotate
+  assert_eq "a note that comes back is logged again" "3" "$(grep -c ' note: ' "$log" || true)"
+
+  jq 'del(.notes)' "$st" > "$W/st.tmp" && mv "$W/st.tmp" "$st"
+  cs rotate
+  assert_eq "a state file from before the key logs the note once" "4" "$(grep -c ' note: ' "$log" || true)"
+  assert_eq "and says nothing ended" "2" "$(grep -c ' note ended: ' "$log" || true)"
+  assert_eq "and remembers it" "1" "$(jq '.notes | length' "$st")"
+  rm -f "$st"
+  cs rotate
+  assert_eq "no state file logs the note once" "5" "$(grep -c ' note: ' "$log" || true)"
+
+  # A log that cannot take a line (a directory in its place): the notes are not
+  # remembered, so the next run with a working log says what is owed.
+  mkdir "$W/state/logdir"
+  jq 'del(.notes)' "$st" > "$W/st.tmp" && mv "$W/st.tmp" "$st"
+  cs rotate --log "$W/state/logdir"
+  assert_rc "a log that cannot be written does not fail a quiet run" 0
+  assert_err_has "it is said on stderr" "cannot write $W/state/logdir"
+  assert_eq "a note it could not log is not remembered" "false" "$(jq 'has("notes")' "$st")"
+  assert_eq "the other state is written as before" "work" "$(jq -r .last_reading.alias "$st")"
+  cs rotate
+  assert_eq "the next run with a working log says what is owed" "6" "$(grep -c ' note: ' "$log" || true)"
+  assert_eq "and remembers it" "1" "$(jq '.notes | length' "$st")"
+  printf '{"caps":{"bad key":{"5h":50},"also bad":{"5h":50}}}\n' > "$caps"
+  cs rotate --log "$W/state/logdir"
+  assert_eq "a note that began but could not be logged is not remembered" "1" "$(jq '.notes | length' "$st")"
+  printf '{"caps":{}}\n' > "$caps"
+  cs rotate --log "$W/state/logdir"
+  assert_eq "nor is the end of one, so it is owed" "1" "$(jq '.notes | length' "$st")"
+  cs rotate
+  assert_eq "the next working log says that note ended" "3" "$(grep -c ' note ended: ' "$log" || true)"
+  assert_eq "and the memory is empty" "false" "$(jq 'has("notes")' "$st")"
+
+  # The login note is one of the notes: logged once, said on stderr every run.
+  local tok; tok="$(setup_token)"
+  printf '%s\n' "$tok" > "$W/tok.txt"
+  CS_STDIN="$W/tok.txt" cs token set work
+  jq '.claudeAiOauth.accessToken = "not-the-token" | .claudeAiOauth.refreshTokenExpiresAt = 1000000' \
+    "$H/.claude/.credentials.json" > "$W/creds.tmp" && mv "$W/creds.tmp" "$H/.claude/.credentials.json"
+  local login='refresh login has expired'
+  cs rotate
+  assert_err_has "the login note is said on stderr" "$login"
+  assert_eq "and logged" "1" "$(grep -c " note: work: .*$login" "$log" || true)"
+  cs rotate
+  assert_err_has "said again on the next run" "$login"
+  assert_eq "but logged once" "1" "$(grep -c "$login" "$log" || true)"
+  stub_stop
+}
+
 s_remove() {
   section "remove"
   new_world remove
@@ -876,7 +982,7 @@ s_fifo_store() {
   stub_stop
 }
 
-for scenario in s_save_and_list s_switch s_keychain_path s_pane s_token s_probe s_gate s_best_and_bar s_rotate s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
+for scenario in s_save_and_list s_switch s_keychain_path s_pane s_token s_probe s_gate s_best_and_bar s_rotate s_rotate_notes s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
   "$scenario"
 done
 summary

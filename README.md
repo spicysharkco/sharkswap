@@ -210,6 +210,17 @@ The rules:
 7. A stored login whose access token expired cannot be probed. It is used only as a
    last resort, and only when something else answered this run.
 
+Notes (an entry in the ceilings file that is ignored or kept refused; a host login
+that is not the current account's one-year token and can no longer refresh) go to
+stderr on every run, but
+a real run logs a note only when it begins (`note: ...`) and when it stops (`note
+ended: ...`), against the `notes` the previous real run kept in the state file. A
+standing note would otherwise fill the log every ten minutes and bury the switches.
+A note spanning several lines is logged a line each, blank lines dropped. If the log
+cannot take a line, the notes are not remembered and the next run logs what is still
+owed. A dry run changes neither the log nor that memory. A run stopped by an unusable
+ceilings file leaves the state alone, so it logs every note again.
+
 Only one run happens at a time: a run takes an exclusive lock on a file next to the
 state file. A second run that finds it taken is not an error: it logs that another run
 is active and exits 0. A run that cannot take the lock at all (the file or its
