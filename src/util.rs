@@ -275,6 +275,26 @@ pub fn trim_nl(s: &str) -> &str {
     s.trim_end_matches('\n')
 }
 
+/// The first line of `text` as a message may show it: printable ASCII only, and
+/// cut at 120 characters with "..." when it was longer. Text read from a store
+/// file can hold anything and is as long as the read cap allows.
+pub fn shown_line(text: &str) -> String {
+    const MAX: usize = 120;
+    let mut line: String = text
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| matches!(c, ' '..='~'))
+        .take(MAX + 1)
+        .collect();
+    if line.len() > MAX {
+        line.truncate(MAX);
+        line.push_str("...");
+    }
+    line
+}
+
 /// The last JSON value of a stream (what `jq -e` judges), None when the text
 /// holds no value or is not valid JSON.
 pub fn last_json(text: &str) -> Option<Value> {
@@ -534,6 +554,22 @@ mod tests {
             .collect();
         v.sort();
         v
+    }
+
+    #[test]
+    fn a_shown_line_is_one_short_printable_line() {
+        assert_eq!(shown_line(""), "");
+        assert_eq!(shown_line("pid=7 started=x\n"), "pid=7 started=x");
+        assert_eq!(shown_line("first\r\nsecond\n"), "first");
+        assert_eq!(shown_line("a\x1b[31mb\x07\tc\u{e9}\u{1f511}d"), "a[31mbcd");
+        assert_eq!(shown_line("\x1b\x07\n"), "");
+        let exact = "y".repeat(120);
+        assert_eq!(shown_line(&exact), exact, "120 characters are shown whole");
+        let cut = shown_line(&"x".repeat(100_000));
+        assert_eq!(cut, format!("{}...", "x".repeat(120)));
+        // What is dropped does not count toward the length.
+        let spread = "z\u{e9}".repeat(200);
+        assert_eq!(shown_line(&spread), format!("{}...", "z".repeat(120)));
     }
 
     #[test]

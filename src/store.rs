@@ -158,14 +158,17 @@ impl Ctx {
                 ));
             }
         }
-        if write_atomic(&self.creds, format!("{json}\n").as_bytes(), 0o600).is_err() {
+        if let Err(e) = write_atomic(&self.creds, format!("{json}\n").as_bytes(), 0o600) {
             if had {
                 let _ = copy_p(&backup, &self.creds);
             } else {
                 rm_f(&self.creds);
             }
             rm_f(&backup);
-            return Err("credentials write failed; restored prior state where possible".into());
+            return Err(format!(
+                "credentials write failed: {}; restored prior state where possible",
+                os_msg(&e)
+            ));
         }
         rm_f(&backup);
         Ok(())
@@ -1004,9 +1007,14 @@ pub struct IdLock {
 
 impl IdLock {
     pub fn acquire(ctx: &Ctx) -> Result<IdLock, i32> {
+        Self::acquire_within(ctx, lock_patience())
+    }
+
+    /// [`acquire`](Self::acquire) with the patience given as `(tries, seconds
+    /// between them)`, so a test need not race the default.
+    fn acquire_within(ctx: &Ctx, (tries, delay): (i64, f64)) -> Result<IdLock, i32> {
         let dir = crate::switch_intent::lock_dir(&ctx.store);
         let owner_file = dir.join("owner");
-        let (tries, delay) = lock_patience();
         let (mut i, mut hard) = (0i64, 0u32);
         loop {
             // A switch that was cut short holds the lock until a person has
@@ -1053,7 +1061,7 @@ impl IdLock {
             i += 1;
             if i >= tries {
                 let owner = read_text(&owner_file)
-                    .map(|t| trim_nl(&t).to_string())
+                    .map(|t| shown_line(&t))
                     .unwrap_or_default();
                 let tail = if owner.is_empty() {
                     String::new()
@@ -1722,7 +1730,9 @@ mod tests {
             std::fs::remove_dir_all(dir).expect("then the lock");
         });
         let started = std::time::Instant::now();
-        let lock = IdLock::acquire(&ctx)
+        // Patience for 30 s, though the holder lets go after 0.4 s: a long stall
+        // under load must not turn the wait into a timeout.
+        let lock = IdLock::acquire_within(&ctx, (300, 0.1))
             .unwrap_or_else(|_| panic!("the waiter should wait for a live switch, not refuse"));
         assert!(
             started.elapsed() >= std::time::Duration::from_millis(300),

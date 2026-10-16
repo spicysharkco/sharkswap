@@ -19,7 +19,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::util::{read_text, trim_nl};
+use crate::util::{read_text, shown_line};
 
 const MARKER: &str = "switch-pending";
 
@@ -65,22 +65,39 @@ pub enum Pending {
 /// the lock timeout); it never turns an interrupted switch into a usable one. A
 /// zombie that was not reaped looks alive the same way.
 pub fn state(store: &Path) -> Pending {
-    if !pending(store) {
-        return Pending::Clear;
+    state_with(store, || {
+        let text = read_text(&lock_dir(store).join("owner")).unwrap_or_default();
+        text.lines().next().unwrap_or("").to_string()
+    })
+}
+
+/// [`state`], with the first line of the owner file read by `read_owner`.
+///
+/// The owner is read again after the liveness check. A lock that changed hands
+/// in between (one switch ended and the next began, so a marker is there either
+/// way) is looked at afresh, a few times; one that never holds still counts as
+/// cut short, the answer that refuses.
+fn state_with(store: &Path, mut read_owner: impl FnMut() -> String) -> Pending {
+    for _ in 0..3 {
+        if !pending(store) {
+            return Pending::Clear;
+        }
+        let owner = read_owner();
+        let live = owner_pid(&owner).is_some_and(holder_alive);
+        // A switch that ended while the owner was read leaves no marker.
+        if !pending(store) {
+            return Pending::Clear;
+        }
+        if read_owner() != owner {
+            continue;
+        }
+        return if live {
+            Pending::InProgress(shown_line(&owner))
+        } else {
+            Pending::Interrupted
+        };
     }
-    let owner = read_text(&lock_dir(store).join("owner")).unwrap_or_default();
-    let owner = trim_nl(&owner).lines().next().unwrap_or("");
-    let live = owner_pid(owner).is_some_and(holder_alive);
-    // A switch that ended while the owner was read leaves no marker.
-    if !pending(store) {
-        return Pending::Clear;
-    }
-    if live {
-        let shown: String = owner.chars().filter(|c| !c.is_control()).collect();
-        Pending::InProgress(shown)
-    } else {
-        Pending::Interrupted
-    }
+    Pending::Interrupted
 }
 
 /// The pid of an owner line (`pid=<N> started=<ISO>`); none that is not a
@@ -381,6 +398,35 @@ mod tests {
     }
 
     #[test]
+    fn a_lock_that_changes_hands_during_the_look_is_looked_at_again() {
+        let _serial = signal_lock();
+        let store = TestStore::new(&[]);
+        let holder = sleeper();
+        let (dead, live) = (
+            "pid=2147483647 started=2026-01-01T00:00:00Z".to_string(),
+            format!("pid={} started=2026-01-01T00:00:05Z", holder.id()),
+        );
+        std::fs::create_dir(lock_dir(&store)).expect("a lock directory");
+        publish(&store, "work").expect("publish");
+
+        // One switch ended and the next began between the two reads of the owner:
+        // the first read is the old, dead owner; every later one is the new, live one.
+        let mut reads = vec![dead.clone(), live.clone(), live.clone(), live.clone()].into_iter();
+        let seen = state_with(&store, || reads.next().expect("no more reads than that"));
+        assert_eq!(seen, Pending::InProgress(live.clone()));
+
+        // An owner that is never the same twice cannot be vouched for: fail closed.
+        let mut n = 0;
+        let seen = state_with(&store, || {
+            n += 1;
+            format!("pid={} started={n}", holder.id())
+        });
+        assert_eq!(seen, Pending::Interrupted);
+        assert!(n <= 8, "the retries are bounded: {n} reads");
+        end(holder);
+    }
+
+    #[test]
     fn the_owner_shown_for_a_running_switch_has_no_control_characters() {
         let _serial = signal_lock();
         let store = TestStore::new(&[]);
@@ -396,6 +442,27 @@ mod tests {
             panic!("the holder is alive");
         };
         assert_eq!(shown, format!("pid={} [31mred", holder.id()));
+        end(holder);
+    }
+
+    #[test]
+    fn the_owner_shown_for_a_running_switch_is_cut_short() {
+        let _serial = signal_lock();
+        let store = TestStore::new(&[]);
+        let holder = sleeper();
+        lock_of_running_switch(&store, holder.id());
+        let owner = lock_dir(&store).join("owner");
+        std::fs::write(
+            &owner,
+            format!("pid={} {}\n", holder.id(), "x".repeat(1 << 20)),
+        )
+        .expect("an owner file");
+        let Pending::InProgress(shown) = state(&store) else {
+            panic!("the holder is alive");
+        };
+        assert!(shown.starts_with(&format!("pid={} xxx", holder.id())));
+        assert!(shown.ends_with("xxx..."), "the cut is marked");
+        assert_eq!(shown.len(), 123);
         end(holder);
     }
 

@@ -117,6 +117,28 @@ s_switch() {
   assert_rc "a live configuration that is not an object stops the switch" 1
   assert_err_has "and the error gives that reason" "could not prevalidate live configuration $H/.claude.json: not a JSON object"
   assert_no_file "and the stopped switch leaves no lock" "$H/.sharkswap/.identity.lock"
+
+  # The live credentials cannot be backed up before a switch: it says why. File
+  # modes do not bind root, so these two need another user.
+  if [[ "$(id -u)" != 0 ]]; then
+    new_world backupwhy
+    save_as work alice@example.com 1
+    save_as personal bob@example.com 2
+    chmod 000 "$H/.claude/.credentials.json"
+    cs work
+    chmod 600 "$H/.claude/.credentials.json"
+    assert_rc "credentials that cannot be copied stop the switch" 1
+    assert_err_has "and the error says what and why" "could not back up live credentials $H/.claude/.credentials.json: cannot copy it: Permission denied"
+    assert_eq "and the live login is as it was" "$(fake_token 2)" "$(live_token)"
+    rm -f "$H/.claude/.claude.json"
+    chmod 500 "$H/.claude"
+    cs work
+    chmod 700 "$H/.claude"
+    assert_rc "a backup file that cannot be made stops the switch" 1
+    assert_err_has "and the error says what and why" "could not back up live credentials $H/.claude/.credentials.json: cannot make a backup file: Permission denied"
+    assert_eq "and the live login is still as it was" "$(fake_token 2)" "$(live_token)"
+    assert_no_file "and no lock is left" "$H/.sharkswap/.identity.lock"
+  fi
 }
 
 # The macOS Keychain path, run on any system: SHARKSWAP_TEST_DARWIN=1 makes
@@ -264,6 +286,9 @@ intent_refuses() {  # label
   assert_out_lacks "$l: before it prints a plan" "Switch plan"
   cs next
   assert_rc "$l: next refuses" 1
+  cs toggle
+  assert_rc "$l: toggle refuses" 1
+  assert_err_has "$l: and says why" "unfinished account switch"
   cs save extra
   assert_rc "$l: save refuses" 1
   assert_err_has "$l: and names the lock" "inspect the identity lock at $H/.sharkswap/.identity.lock"
@@ -451,20 +476,17 @@ s_switch_intent() {
       dangling) ln -s "$W/nowhere" "$marker" ;;
       fifo) mkfifo "$marker" ;;
     esac
-    CS_WRAP=()
-    command -v timeout >/dev/null 2>&1 && CS_WRAP=(timeout 20)
-    cs bar
+    cs_limit bar
     assert_rc "a $kind marker: bar returns" 0
     assert_out_has "a $kind marker: and infers no account" "no account"
-    cs bar work
+    cs_limit bar work
     assert_out_has "a $kind marker: a named account is still shown" "work"
     CS_ENV=(CLAUDE_CONFIG_DIR="$H/.sharkswap/homes/work")
-    cs bar
+    cs_limit bar
     assert_out_has "a $kind marker: so is an isolated home's account" "work"
     CS_ENV=()
-    cs status
+    cs_limit status
     assert_rc "a $kind marker: status refuses" 1
-    CS_WRAP=()
   done
 
   # The owner file is read (to tell a switch that is running from one that was cut
@@ -482,18 +504,15 @@ s_switch_intent() {
       zero) echo "pid=0 started=2026-01-01T00:00:00Z" > "$owner" ;;
       negative) echo "pid=-1 started=2026-01-01T00:00:00Z" > "$owner" ;;
     esac
-    CS_WRAP=()
-    command -v timeout >/dev/null 2>&1 && CS_WRAP=(timeout 20)
-    cs status
+    cs_limit status
     assert_rc "a $kind owner: status refuses" 1
     assert_err_has "a $kind owner: as an unfinished switch" "unfinished account switch"
-    cs save extra
+    cs_limit save extra
     assert_rc "a $kind owner: save refuses without waiting" 1
     assert_err_has "a $kind owner: as an unfinished switch" "unfinished account switch"
-    cs bar
+    cs_limit bar
     assert_rc "a $kind owner: bar returns" 0
     assert_out_has "a $kind owner: and infers no account" "no account"
-    CS_WRAP=()
   done
   rm -rf "${lock:?}"
   stub_stop
@@ -543,7 +562,7 @@ s_switch_live() {
   live_holder
 
   # Not waiting for the lock: they refuse at once, with the holder named.
-  for st in "status" "" "work" "next" "best --switch" "probe" "rotate --dry-run" "rotate"; do
+  for st in "status" "" "work" "next" "toggle" "best --switch" "probe" "rotate --dry-run" "rotate"; do
     # shellcheck disable=SC2086  # the words of one command line
     cs $st
     assert_rc "live '$st': refuses" 1
@@ -571,6 +590,22 @@ s_switch_live() {
   assert_out_lacks "live: and not as an unfinished switch" "unfinished account switch"
   assert_file "live: the holder's lock is untouched" "$lock/owner"
   assert_file "live: so is its marker" "$lock/switch-pending"
+
+  # The owner in those messages is one short printable line, whatever the file holds.
+  printf 'pid=%s %s\033[31mred\n%s\n' "$HOLDER_PID" "$(head -c 400 /dev/zero | tr '\0' x)" second > "$lock/owner"
+  CS_ENV=(SHARKSWAP_LOCK_ATTEMPTS=2 SHARKSWAP_LOCK_DELAY=0.05)
+  cs save extra
+  CS_ENV=()
+  assert_rc "live: a long owner line: the wait times out" 1
+  assert_err_has "live: and the timeout shows the start of the line" "identity lock timed out (owner: pid=$HOLDER_PID xxxx"
+  assert_err_has "live: cut, and says so" "xxx...); refusing to steal it"
+  assert_out_lacks "live: without the control characters" "$(printf '\033')"
+  assert_out_lacks "live: or the second line" "second"
+  cs status
+  assert_err_has "live: the refusal shows the start of the line" "in progress (owner: pid=$HOLDER_PID xxxx"
+  assert_err_has "live: cut, and says so" "xxx...); try again when it finishes"
+  assert_out_lacks "live: without the control characters either" "$(printf '\033')"
+  printf 'pid=%s started=2026-01-01T00:00:00Z\n' "$HOLDER_PID" > "$lock/owner"
 
   # The status line never reads the owner file and infers nothing under a marker.
   cs bar

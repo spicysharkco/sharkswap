@@ -541,6 +541,10 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
         return Err(1);
     }
     let Some(block) = read_last_json(&src) else {
+        eprintln!(
+            "error: cannot read account metadata {}: unreadable or no longer valid JSON",
+            src.display()
+        );
         return Err(1);
     };
     let oauth = match tok_block {
@@ -548,7 +552,13 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
         None => {
             match read_last_json(&ctx.snap(alias)).and_then(|v| v.get("claudeAiOauth").cloned()) {
                 Some(o) => o,
-                None => return Err(1),
+                None => {
+                    eprintln!(
+                        "error: cannot find the claudeAiOauth block in {}",
+                        ctx.snap(alias).display()
+                    );
+                    return Err(1);
+                }
             }
         }
     };
@@ -621,15 +631,27 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
             eprintln!("error: live credentials are malformed; refusing to replace them");
             return Err(1);
         }
-        let Ok(cb) = mktemp(suffixed(&ctx.creds, ".switch-backup.")) else {
-            cleanup(&backups);
-            return Err(1);
+        let cr = ctx.creds.display();
+        let cb = match mktemp(suffixed(&ctx.creds, ".switch-backup.")) {
+            Ok(cb) => cb,
+            Err(e) => {
+                cleanup(&backups);
+                eprintln!(
+                    "error: could not back up live credentials {cr}: cannot make a backup file: {}",
+                    os_msg(&e)
+                );
+                return Err(1);
+            }
         };
         if ctx.creds.exists() {
             creds_had = true;
-            if copy_p(&ctx.creds, &cb).is_err() {
+            if let Err(e) = copy_p(&ctx.creds, &cb) {
                 rm_f(&cb);
                 cleanup(&backups);
+                eprintln!(
+                    "error: could not back up live credentials {cr}: cannot copy it: {}",
+                    os_msg(&e)
+                );
                 return Err(1);
             }
         }
