@@ -564,11 +564,13 @@ fn security_password(stdout: &[u8]) -> String {
         b'a'..=b'f' => Some(b - b'a' + 10),
         _ => None,
     };
-    if text.len() % 2 == 0 {
+    if text.len().is_multiple_of(2) {
         let bytes: Option<Vec<u8>> = text
             .as_bytes()
-            .chunks_exact(2)
-            .map(|p| Some((digit(p[0])? << 4) | digit(p[1])?))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|[hi, lo]| Some((digit(*hi)? << 4) | digit(*lo)?))
             .collect();
         if let Some(bytes) = bytes.filter(|b| b.iter().any(|c| !(0x20..=0x7e).contains(c)))
             && let Ok(decoded) = String::from_utf8(bytes)
