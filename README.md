@@ -65,28 +65,31 @@ the archive for your system and the `SHA256SUMS` file:
 | Linux, ARM64 | `sharkswap-VERSION-aarch64-unknown-linux-musl.tar.gz` |
 
 The Linux binaries are statically linked, so they run on any distribution. Check the
-archive, unpack it and install (the example is version 1.0.0 for Apple silicon):
+archive, unpack it and install. The example is version 1.0.0 for Apple silicon; set `a`
+to the archive name for your version and system from the table above:
 
 ```sh
-a=sharkswap-1.0.0-aarch64-apple-darwin    # your version and system, from the table above
-grep -F " $a.tar.gz" SHA256SUMS | shasum -a 256 -c -    # macOS
-grep -F " $a.tar.gz" SHA256SUMS | sha256sum -c -        # Linux
+a=sharkswap-1.0.0-aarch64-apple-darwin
+grep -F " $a.tar.gz" SHA256SUMS | shasum -a 256 -c -
 gh attestation verify "$a.tar.gz" --repo spicysharkco/sharkswap \
   --signer-workflow spicysharkco/sharkswap/.github/workflows/release.yml \
   --source-ref refs/tags/v1.0.0
 tar -xzf "$a.tar.gz"
-xattr -dr com.apple.quarantine "$a"    # macOS, browser download only
+xattr -dr com.apple.quarantine "$a"
 cd "$a"
-./install.sh --binary ./sharkswap    # copies the binary to ~/.local/bin and adds a cs link
+./install.sh --binary ./sharkswap
 ```
 
-`shasum` and `sha256sum` check that the download is intact and print `OK`; `grep` picks
-the line for your archive, so this also works with BusyBox. `gh attestation verify`
+On Linux, check with `sha256sum -c -` in place of `shasum -a 256 -c -`, and skip
+`xattr`: it is only needed on macOS after a browser download (see below). `shasum` and
+`sha256sum` check that the download is intact and print `OK`; `grep` picks the line for
+your archive, so this also works with BusyBox. `gh attestation verify`
 (GitHub CLI) checks that this repository's release workflow, run for the tag you
 downloaded, built the archive; it reads the attestation through the GitHub API, so run
-`gh auth login` first. `install.sh` takes `--prefix DIR` and `--uninstall` as described
-below. To install by hand instead, copy `sharkswap` to `~/.local/bin` (on your `PATH`) and
-link `cs` next to it: `ln -s sharkswap ~/.local/bin/cs`. If you use `cargo-binstall`,
+`gh auth login` first. `install.sh` copies the binary to `~/.local/bin` and adds a `cs`
+link; it takes `--prefix DIR` and `--uninstall` as described below. To install by hand
+instead, run `mkdir -p ~/.local/bin`, copy `sharkswap` there (it must be on your `PATH`)
+and link `cs` next to it: `ln -s sharkswap ~/.local/bin/cs`. If you use `cargo-binstall`,
 `cargo binstall --git https://github.com/spicysharkco/sharkswap sharkswap` clones the
 repository, reads the version from `Cargo.toml` on the default branch and downloads that
 version's archive (so it can be newer than the latest release; if that version has no
@@ -117,11 +120,14 @@ from source:
 ```sh
 git clone https://github.com/spicysharkco/sharkswap
 cd sharkswap
-cargo build --release --locked   # no test hooks (see Tests); this is the build to install
-./install.sh                 # copies the binary to ~/.local/bin and adds a cs link
-./install.sh --prefix DIR    # or into another directory
-./install.sh --uninstall     # removes only what it installed
+cargo build --release --locked
+./install.sh
 ```
+
+The release build has no test hooks (see Tests); it is the build to install.
+`./install.sh` copies the binary to `~/.local/bin` and adds a `cs` link.
+`./install.sh --prefix DIR` installs into another directory instead, and
+`./install.sh --uninstall` removes only what it installed.
 
 `cs` is only a shorthand. It is a symlink to `sharkswap`, made by `install.sh`
 (or by hand: `ln -s sharkswap ~/.cargo/bin/cs`); the program behaves the same
@@ -149,7 +155,8 @@ cs
 # 4. Switch.
 cs work
 cs personal
-cs next          # round-robin, skipping any account over its ceiling
+# Or round-robin, skipping any account over its ceiling:
+cs next
 ```
 
 After a switch, start a new `claude` session. A session that is already running may
@@ -158,7 +165,8 @@ keep the account it started with.
 Two accounts in two terminals at once:
 
 ```sh
-eval "$(cs pane work)"       # this shell now uses work, in its own config directory
+# This shell now uses work, in its own config directory:
+eval "$(cs pane work)"
 claude
 ```
 
@@ -492,10 +500,14 @@ per-call cost matters.
 ## Tests
 
 ```sh
-cargo test --locked                           # unit tests
-cargo test --locked --features test-hooks     # the same, with the hooks compiled in
-bash test/run.sh                 # builds target/test-hooks/ with the hooks, then runs the black-box tests
-CS_BIN=/path/to/sharkswap bash test/run.sh # or against another build that has the hooks
+# Unit tests:
+cargo test --locked
+# The same, with the hooks compiled in:
+cargo test --locked --features test-hooks
+# Build target/test-hooks/ with the hooks, then run the black-box tests:
+bash test/run.sh
+# Or run them against another build that has the hooks:
+CS_BIN=/path/to/sharkswap bash test/run.sh
 ```
 
 `test/run.sh` runs the unit tests of the write-containment checker, the end-to-end
