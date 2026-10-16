@@ -90,9 +90,9 @@ downloaded, built the archive; it reads the attestation through the GitHub API, 
 `gh auth login` first. `install.sh` copies the binary to `~/.local/bin` and adds a `cs`
 link; it takes `--prefix DIR` and `--uninstall` as described below. To install by hand
 instead, run `mkdir -p ~/.local/bin`, copy `sharkswap` there (that directory must be on
-your `PATH`) and link `cs` next to it: `ln -s sharkswap ~/.local/bin/cs`. If you use `cargo-binstall`,
-`cargo binstall --git https://github.com/spicysharkco/sharkswap sharkswap` clones the
-repository, reads the version from `Cargo.toml` on the default branch and downloads that
+your `PATH`) and link `cs` next to it: `ln -s sharkswap ~/.local/bin/cs`. If you use
+`cargo-binstall`, `cargo binstall --git https://github.com/spicysharkco/sharkswap sharkswap`
+clones the repository, reads the version from `Cargo.toml` on the default branch and downloads that
 version's archive (so it can be newer than the latest release; if that version has no
 archive, binstall builds from source). It installs `sharkswap` only, with no `cs` link,
 and checks neither `SHA256SUMS` nor the attestation.
@@ -495,7 +495,7 @@ cargo test --locked --features test-hooks
 bash test/run.sh
 ```
 
-The first runs the unit tests, the second the same with the hooks compiled in.
+The first runs the Rust unit tests, the second the same with the hooks compiled in.
 `bash test/run.sh` builds `target/test-hooks/` with the hooks, then runs the black-box
 tests; `CS_BIN=/path/to/sharkswap bash test/run.sh` runs them against another build
 that has the hooks.
