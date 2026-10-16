@@ -25,6 +25,9 @@ other programs and to the network in a few places, and all of them are listed he
 
 Unofficial; not affiliated with Anthropic.
 
+sharkswap is beta (0.x): commands, output and file formats may still change
+before 1.0. The [changelog](CHANGELOG.md) lists every change.
+
 Use responsibly: follow the terms of each account you use.
 
 ## What it does
@@ -65,16 +68,16 @@ the archive for your system and the `SHA256SUMS` file:
 | Linux, ARM64 | `sharkswap-VERSION-aarch64-unknown-linux-musl.tar.gz` |
 
 The Linux binaries are statically linked, so they run on any distribution. Check the
-archive, unpack it and install. The example is version 1.0.0 for Apple silicon; set `a`
+archive, unpack it and install. The example is version 0.2.0 for Apple silicon; set `a`
 to the archive name for your version and system from the table above, without
 `.tar.gz`:
 
 ```sh
-a=sharkswap-1.0.0-aarch64-apple-darwin
+a=sharkswap-0.2.0-aarch64-apple-darwin
 grep -F " $a.tar.gz" SHA256SUMS | shasum -a 256 -c -
 gh attestation verify "$a.tar.gz" --repo spicysharkco/sharkswap \
   --signer-workflow spicysharkco/sharkswap/.github/workflows/release.yml \
-  --source-ref refs/tags/v1.0.0
+  --source-ref refs/tags/v0.2.0
 tar -xzf "$a.tar.gz"
 xattr -dr com.apple.quarantine "$a"
 cd "$a"
