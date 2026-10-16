@@ -14,6 +14,13 @@ categories = ["command-line-utilities"]
 name = "sharkswap"
 path = "src/main.rs"
 
+# cargo-binstall: where the release archives (see .github/workflows/release.yml
+# and .github/scripts/package.sh) are and what is inside them.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+
 [features]
 # Test hooks: environment variables that let the black-box tests stand in for
 # the macOS `security` tool and force the macOS code path on Linux. A build

@@ -1,5 +1,8 @@
 # sharkswap
 
+[![CI](https://github.com/spicysharkco/sharkswap/actions/workflows/ci.yml/badge.svg)](https://github.com/spicysharkco/sharkswap/actions/workflows/ci.yml)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE)
+
 A Claude Code account switcher. Switch (swap) between several Claude Code
 accounts from the command line, see how much of each account's 5-hour and weekly
 allowance is used, and (optionally) let a timer move your login to another
@@ -47,6 +50,45 @@ the name it shows. Swapping the name without the token changes nothing real, so
   monthly re-login.
 
 ## Install
+
+### Prebuilt binary
+
+No Rust toolchain is needed. From the
+[Releases page](https://github.com/spicysharkco/sharkswap/releases/latest), download
+the archive for your system and the `SHA256SUMS` file:
+
+| System | Archive |
+|---|---|
+| macOS, Apple silicon | `sharkswap-VERSION-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `sharkswap-VERSION-x86_64-apple-darwin.tar.gz` |
+| Linux, x86-64 | `sharkswap-VERSION-x86_64-unknown-linux-musl.tar.gz` |
+| Linux, ARM64 | `sharkswap-VERSION-aarch64-unknown-linux-musl.tar.gz` |
+
+The Linux binaries are statically linked, so they run on any distribution. Check the
+archive, unpack it and install (the example is version 1.0.0 for Apple silicon):
+
+```sh
+shasum -a 256 -c SHA256SUMS --ignore-missing
+gh attestation verify sharkswap-1.0.0-aarch64-apple-darwin.tar.gz --repo spicysharkco/sharkswap
+tar -xzf sharkswap-1.0.0-aarch64-apple-darwin.tar.gz
+cd sharkswap-1.0.0-aarch64-apple-darwin
+./install.sh --binary ./sharkswap    # copies the binary to ~/.local/bin and adds a cs link
+```
+
+`shasum` checks that the download is intact. `gh attestation verify` (GitHub CLI)
+checks that GitHub Actions built the archive from this repository. `install.sh` takes
+`--prefix DIR` and `--uninstall` as described below. To install by hand instead, put
+`sharkswap` in a directory on your `PATH` and link `cs` to it:
+`ln -s sharkswap ~/.local/bin/cs`. If you use `cargo-binstall`,
+`cargo binstall --git https://github.com/spicysharkco/sharkswap sharkswap` fetches the
+same archive (it installs `sharkswap` only, with no `cs` link).
+
+The macOS binaries are not notarised by Apple. If a browser download is blocked ("cannot
+be opened because the developer cannot be verified"), clear the quarantine flag on the
+unpacked directory with `xattr -dr com.apple.quarantine sharkswap-1.0.0-aarch64-apple-darwin`.
+A download made with `curl` or `gh release download` is not flagged.
+
+### With cargo
 
 You need Rust 1.89 or newer (`rustup` is the easy way to get it).
 

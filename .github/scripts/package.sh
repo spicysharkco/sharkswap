@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Pack a release build of sharkswap into a release archive.
+#
+#   .github/scripts/package.sh TARGET VERSION [OUT_DIR]
+#
+# Run `cargo build --release --locked --target TARGET` first. The archive is
+# OUT_DIR/sharkswap-VERSION-TARGET.tar.gz (OUT_DIR defaults to target/dist). It
+# holds one directory, sharkswap-VERSION-TARGET/, with the binary, LICENSE,
+# README.md and install.sh. The binary is already stripped: the release profile
+# in Cargo.toml sets strip = true.
+#
+# A binary that contains the test hook names (it was built with the test-hooks
+# feature) is refused, the same way CI refuses it.
+set -euo pipefail
+
+die() { echo "package: $*" >&2; exit 1; }
+
+(( $# == 2 || $# == 3 )) || { echo "usage: package.sh TARGET VERSION [OUT_DIR]" >&2; exit 2; }
+target="$1"
+version="$2"
+[[ "$target" =~ ^[a-z0-9_]+(-[a-z0-9_]+)+$ ]] || die "not a target triple: $target"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]] || die "not a version: $version"
+
+name=sharkswap
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+out="${3:-$root/target/dist}"
+bin="$root/target/$target/release/$name"
+dir="$name-$version-$target"
+
+[[ -f "$bin" && -x "$bin" ]] || die "no binary at $bin; run: cargo build --release --locked --target $target"
+
+# grep: 0 = found, 1 = not found, anything else (2) = it could not look.
+rc=0
+LC_ALL=C grep -aqE 'SHARKSWAP_(TEST|NOW|LOCK_)' "$bin" || rc=$?
+case "$rc" in
+  0) die "$bin contains test hook names; build it without --features test-hooks" ;;
+  1) ;;
+  *) die "grep failed (status $rc) while checking $bin" ;;
+esac
+
+mkdir -p "$out"
+stage="$(mktemp -d)"
+trap 'rm -rf "${stage:?}"' EXIT
+
+mkdir "$stage/$dir"
+install -m 755 "$bin" "$stage/$dir/$name"
+install -m 755 "$root/install.sh" "$stage/$dir/install.sh"
+install -m 644 "$root/LICENSE" "$root/README.md" "$stage/$dir/"
+
+# Entries belong to root:root whoever built the archive. GNU tar and bsdtar
+# (macOS) spell this differently; bsdtar is also kept from writing extended
+# attributes and AppleDouble files.
+if [[ "$(tar --version 2>&1 || true)" == *"GNU tar"* ]]; then
+  owner=(--owner=0 --group=0 --numeric-owner)
+else
+  owner=(--uid 0 --gid 0 --uname root --gname root --no-xattrs)
+fi
+
+archive="$out/$dir.tar.gz"
+COPYFILE_DISABLE=1 tar "${owner[@]}" -C "$stage" -czf "$archive" "$dir"
+echo "$archive"
