@@ -359,8 +359,9 @@ There is no command that clears the state, on purpose: a person has to look firs
    it had changed something leaves copies of the previous files next to the live ones
    (`~/.claude.json.backup.*`, `~/.claude/.claude.json.backup.*`,
    `~/.claude/.credentials.json.switch-backup.*`, and on a Mac
-   `~/.sharkswap/keychain-prior-login.*`); the error names them. Keep them until you
-   are sure which login you want.
+   `~/.sharkswap/keychain-prior-login.*`); the switch's errors name each one ("a copy of
+   the previous file is kept at ..."), including when only the marker could not be
+   cleared. Keep them until you are sure which login you want.
 3. Remove the abandoned lock: `rm -rf ~/.sharkswap/.identity.lock`.
 4. Switch explicitly to an account you know is saved: `cs <alias>`. That rewrites all
    three files. If none is saved, run `/login` in Claude Code instead.

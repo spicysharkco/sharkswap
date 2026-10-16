@@ -86,6 +86,17 @@ fn oauth_only(v: &Value) -> Value {
     Value::Object(m)
 }
 
+/// Say where each copy of a previous file is kept, so that nobody has to guess
+/// at a name that has a random tail.
+fn name_kept_copies<'a>(copies: impl IntoIterator<Item = &'a PathBuf>) {
+    for k in copies {
+        eprintln!(
+            "error: a copy of the previous file is kept at {}",
+            k.display()
+        );
+    }
+}
+
 /// `jq --argjson b BLOCK '.oauthAccount = $b'` over a file's text. None when
 /// jq would fail (not JSON, not an object) or print nothing at all.
 fn with_account(text: &str, block: &Value) -> Option<String> {
@@ -560,15 +571,22 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
             eprintln!("error: could not back up live configuration {f}");
             return Err(1);
         };
-        let out = read_text(file)
-            .ok()
-            .and_then(|t| with_account(&t, &block))
-            .filter(|_| copy_p(file, &backup).is_ok());
-        let Some(out) = out else {
-            rm_f(&backup);
-            cleanup(&backups);
-            eprintln!("error: could not prevalidate live configuration {f}");
-            return Err(1);
+        let out = match read_text(file) {
+            Err(e) => Err(os_msg(&e)),
+            Ok(t) => with_account(&t, &block).ok_or_else(|| "not a JSON object".to_string()),
+        }
+        .and_then(|out| match copy_p(file, &backup) {
+            Ok(()) => Ok(out),
+            Err(e) => Err(format!("cannot copy it: {}", os_msg(&e))),
+        });
+        let out = match out {
+            Ok(out) => out,
+            Err(why) => {
+                rm_f(&backup);
+                cleanup(&backups);
+                eprintln!("error: could not prevalidate live configuration {f}: {why}");
+                return Err(1);
+            }
         };
         staged.push(out);
         backups.push(backup);
@@ -650,12 +668,7 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
             rm_cb(&creds_backup);
             creds_backup = None;
         }
-        for k in creds_backup.iter().chain(&backups) {
-            eprintln!(
-                "error: a copy of the previous file is kept at {}",
-                k.display()
-            );
-        }
+        name_kept_copies(creds_backup.iter().chain(&backups));
         return Err(1);
     }
     switch_intent::fault("creds");
@@ -717,6 +730,11 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
                 eprintln!(
                     "error: prior identity restored but switch intent could not be cleared; backups retained for inspection"
                 );
+                if !creds_had {
+                    rm_cb(&creds_backup);
+                    creds_backup = None;
+                }
+                name_kept_copies(creds_backup.iter().chain(&backups));
             }
             eprintln!("error: switch commit failed; restored prior state where possible");
             return Err(1);
@@ -737,16 +755,19 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
              the new login or a partial change",
             not_restored.join(", ")
         );
-        for k in &kept {
-            eprintln!(
-                "error: a copy of the previous file is kept at {}",
-                k.display()
-            );
-        }
+        name_kept_copies(&kept);
         return Err(1);
     }
     if switch_intent::clear(&ctx.store).is_err() {
         eprintln!("error: account switch completed but its intent could not be cleared");
+        // The copies of the previous files stay, as they do when the put-back
+        // is what could not be cleared: say where they are. A credentials
+        // placeholder for a file that did not exist is not a copy of anything.
+        if !creds_had {
+            rm_cb(&creds_backup);
+            creds_backup = None;
+        }
+        name_kept_copies(creds_backup.iter().chain(&backups));
         return Err(1);
     }
     rm_cb(&creds_backup);

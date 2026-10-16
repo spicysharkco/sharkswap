@@ -126,16 +126,36 @@ impl Ctx {
         if self.darwin && !self.creds.is_file() {
             return keychain_write(json);
         }
+        self.creds_file_write(json).map_err(|why| {
+            eprintln!("error: {why}");
+            1
+        })
+    }
+
+    /// The file form of `creds_write`; the error is the line to print.
+    fn creds_file_write(&self, json: &str) -> Result<(), String> {
         if let Some(dir) = self.creds.parent() {
-            std::fs::create_dir_all(dir).map_err(|_| 1)?;
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("cannot create {}: {}", dir.display(), os_msg(&e)))?;
         }
-        let backup = mktemp(suffixed(&self.creds, ".bak.")).map_err(|_| 1)?;
+        let backup = mktemp(suffixed(&self.creds, ".bak.")).map_err(|e| {
+            format!(
+                "cannot make a rollback copy of {}: {}",
+                self.creds.display(),
+                os_msg(&e)
+            )
+        })?;
         let mut had = false;
         if self.creds.exists() {
             had = true;
-            if copy_p(&self.creds, &backup).is_err() {
+            if let Err(e) = copy_p(&self.creds, &backup) {
                 rm_f(&backup);
-                return Err(1);
+                return Err(format!(
+                    "cannot copy {} to {}: {}",
+                    self.creds.display(),
+                    backup.display(),
+                    os_msg(&e)
+                ));
             }
         }
         if write_atomic(&self.creds, format!("{json}\n").as_bytes(), 0o600).is_err() {
@@ -145,8 +165,7 @@ impl Ctx {
                 rm_f(&self.creds);
             }
             rm_f(&backup);
-            eprintln!("error: credentials write failed; restored prior state where possible");
-            return Err(1);
+            return Err("credentials write failed; restored prior state where possible".into());
         }
         rm_f(&backup);
         Ok(())
@@ -1760,6 +1779,51 @@ mod tests {
             .map(|e| e.expect("entry").file_name())
             .collect();
         assert_eq!(left.len(), 1, "no temp or backup file is left: {left:?}");
+    }
+
+    #[test]
+    fn creds_file_write_says_why_when_it_cannot_start() {
+        let home = TestStore::new(&[]);
+        let mut ctx = Ctx::at(home.to_path_buf(), true).unwrap_or_else(|_| panic!("a context"));
+        ctx.darwin = false;
+
+        // The credentials directory cannot be made: its parent is a file.
+        let blocker = home.join("blocker");
+        std::fs::write(&blocker, "").expect("a file");
+        ctx.creds = blocker.join("dir").join(".credentials.json");
+        let why = ctx
+            .creds_file_write(r#"{"a":1}"#)
+            .expect_err("no directory can be made");
+        assert!(why.starts_with("cannot create "), "{why}");
+        assert!(why.contains("blocker/dir"), "{why}");
+        assert!(
+            why.len() > "cannot create : ".len() + 20,
+            "a cause follows: {why}"
+        );
+
+        // The rollback copy cannot be made: the name is too long for one more suffix.
+        let dir = home.join("long");
+        std::fs::create_dir(&dir).expect("a directory");
+        ctx.creds = dir.join("c".repeat(250));
+        let why = ctx
+            .creds_file_write(r#"{"a":1}"#)
+            .expect_err("the rollback name is too long");
+        assert!(why.starts_with("cannot make a rollback copy of "), "{why}");
+        assert!(why.contains("File name too long"), "{why}");
+
+        // The live file cannot be read for its copy: it is a directory.
+        ctx.creds = dir.join(".credentials.json");
+        std::fs::create_dir(&ctx.creds).expect("a directory in the file's place");
+        let why = ctx
+            .creds_file_write(r#"{"a":1}"#)
+            .expect_err("a directory cannot be copied");
+        assert!(why.starts_with("cannot copy "), "{why}");
+        assert!(why.contains(".credentials.json to "), "{why}");
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "the rollback file is removed: {left:?}");
     }
 
     /// The context for a test that runs against the real `security`: the macOS

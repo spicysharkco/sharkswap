@@ -105,6 +105,18 @@ s_switch() {
   cs save lapsed
   assert_rc "an expired login can still be saved (it refreshes on use)" 0
   assert_out_has "and the expiry is called out" "EXPIRED"
+
+  # A live configuration that cannot be used says why, not only that it failed:
+  # one byte over the 64 MiB cap, then one that is not an object.
+  perl -e 'truncate($ARGV[0], 64 * 1024 * 1024 + 1) or die "truncate: $!"' "$H/.claude.json"
+  cs work
+  assert_rc "a live configuration over the size cap stops the switch" 1
+  assert_err_has "and the error gives the reason" "could not prevalidate live configuration $H/.claude.json: larger than the size cap"
+  echo '[1]' > "$H/.claude.json"
+  cs work
+  assert_rc "a live configuration that is not an object stops the switch" 1
+  assert_err_has "and the error gives that reason" "could not prevalidate live configuration $H/.claude.json: not a JSON object"
+  assert_no_file "and the stopped switch leaves no lock" "$H/.sharkswap/.identity.lock"
 }
 
 # The macOS Keychain path, run on any system: SHARKSWAP_TEST_DARWIN=1 makes
@@ -258,6 +270,32 @@ intent_refuses() {  # label
   cs remove personal
   assert_rc "$l: remove refuses" 1
   assert_file "$l: and removed nothing" "$H/.sharkswap/personal.json"
+  cs
+  assert_rc "$l: the overview refuses" 1
+  assert_err_has "$l: and says why" "unfinished account switch"
+  assert_eq "$l: and prints nothing" "" "$OUT"
+  cs best --switch
+  assert_rc "$l: best --switch refuses" 1
+  assert_err_has "$l: and says why" "unfinished account switch"
+  cs pane work
+  assert_rc "$l: pane refuses" 1
+  assert_err_has "$l: and says why" "unfinished account switch"
+  assert_no_file "$l: and makes no pane home" "$H/.sharkswap/homes/work"
+  # A watch runs for ever, but a bad interval ends it after its first pass, which
+  # is the pass that would snapshot the token.
+  CS_ENV=(WATCH_INTERVAL=bad)
+  cs watch
+  CS_ENV=()
+  assert_err_has "$l: a watch pass refuses to snapshot" "unfinished account switch"
+  assert_out_lacks "$l: and snapshots nothing" "re-snapshotted"
+  local posts av
+  posts="$(grep -c '^POST /v1/messages' "$STUB_LOG" || true)"
+  av="$(cat "$H/.sharkswap/availability.json")"
+  cs probe
+  assert_rc "$l: probe refuses" 1
+  assert_err_has "$l: at once" "unfinished account switch"
+  assert_eq "$l: before it sends a request" "$posts" "$(grep -c '^POST /v1/messages' "$STUB_LOG" || true)"
+  assert_eq "$l: or records a reading" "$av" "$(cat "$H/.sharkswap/availability.json")"
   cs rotate --dry-run
   assert_rc "$l: a dry-run rotation refuses" 1
   assert_err_has "$l: and says so" "unfinished account switch"
@@ -296,6 +334,12 @@ s_switch_intent() {
   new_world intent
   save_as work alice@example.com 1
   save_as personal bob@example.com 2
+  # A probe that got past the marker would reach this stub: the counts say it did not.
+  stub_start
+  stub_route 1 work 200 "$(rl_headers 0.10 0.20)"
+  stub_route 2 personal 200 "$(rl_headers 0.10 0.20)"
+  # Readings, so that best --switch has an account to move to and reaches the switch.
+  cs probe
   local lock="$H/.sharkswap/.identity.lock" marker="$H/.sharkswap/.identity.lock/switch-pending"
   local spec point sig want_rc want_tok want_primary
 
@@ -342,6 +386,11 @@ s_switch_intent() {
   assert_rc "clear: a switch whose intent stays fails" 1
   assert_err_has "clear: and says so" "account switch completed but its intent could not be cleared"
   assert_err_has "clear: with the lock kept" "identity lock retained at $lock for inspection"
+  # The copies of the previous files stay, and the error names every one.
+  assert_err_has "clear: and names the saved credentials" "a copy of the previous file is kept at $H/.claude/.credentials.json.switch-backup."
+  assert_err_has "clear: and the saved primary configuration" "a copy of the previous file is kept at $H/.claude.json.backup."
+  assert_err_has "clear: and the saved second configuration" "a copy of the previous file is kept at $H/.claude/.claude.json.backup."
+  assert_eq "clear: every copy it names is there" "3" "$(grep -o 'kept at [^ ]*' <<<"$ERR" | cut -d' ' -f3 | while read -r f; do [[ -f "$f" ]] && echo "$f"; done | wc -l | tr -d ' ')"
   assert_eq "clear: the switch itself landed" "alice@example.com" "$(live_email)"
   assert_file "clear: the intent stays" "$marker"
   intent_refuses "clear"
@@ -367,6 +416,9 @@ s_switch_intent() {
   CS_ENV=()
   assert_rc "rollback+clear: the switch fails" 1
   assert_err_has "rollback+clear: and says what stayed" "prior identity restored but switch intent could not be cleared; backups retained for inspection"
+  assert_err_has "rollback+clear: and names the saved credentials" "a copy of the previous file is kept at $H/.claude/.credentials.json.switch-backup."
+  assert_err_has "rollback+clear: and the saved primary configuration" "a copy of the previous file is kept at $H/.claude.json.backup."
+  assert_err_has "rollback+clear: and the saved second configuration" "a copy of the previous file is kept at $H/.claude/.claude.json.backup."
   assert_eq "rollback+clear: the old login is back" "bob@example.com" "$(live_email)"
   assert_file "rollback+clear: the intent stays" "$marker"
   assert_eq "rollback+clear: with the backups" "2" "$(find "$H" -name '*.backup.*' | wc -l | tr -d ' ')"
@@ -1265,6 +1317,9 @@ s_help_and_dispatch() {
   cs -h
   assert_eq "-h prints the same" "$help_out" "$OUT"
   assert_out_lacks "help stops at the end of the comment block" "set -euo pipefail"
+  assert_out_has "help names the copies a failed switch keeps" "*.backup.*"
+  assert_out_has "all of them" "*.switch-backup.*"
+  assert_out_has "and the Keychain one" "keychain-prior-login.*"
 
   # Every word the dispatch answers as a command is refused as an account name
   # (the Rust test dispatch_table_matches_the_reserved_words keeps the table and
