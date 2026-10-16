@@ -127,10 +127,13 @@ s_switch() {
   cp "$H/.claude/.credentials.json" "$W/credentials.kept"
   perl -e 'truncate($ARGV[0], 64 * 1024 * 1024 + 1) or die "truncate: $!"' "$H/.claude/.credentials.json"
   cs work
+  # Checked before the copy is put back: that copy would hide a switch that wrote anyway.
+  assert_eq "and the live credentials are left as they were" "$((64 * 1024 * 1024 + 1))" "$(wc -c < "$H/.claude/.credentials.json" | tr -d ' ')"
   cp "$W/credentials.kept" "$H/.claude/.credentials.json"
   assert_rc "credentials that cannot be copied stop the switch" 1
   assert_err_has "and the error says what and why" "could not back up live credentials $H/.claude/.credentials.json: cannot copy it: larger than the size cap"
-  assert_eq "and the live login is as it was" "$(fake_token 2)" "$(live_token)"
+  assert_eq "and the live account is as it was" "bob@example.com" "$(live_email)"
+  assert_eq "and no backup file is left" "0" "$(find "$H" \( -name '*.backup.*' -o -name '*.switch-backup.*' \) | wc -l | tr -d ' ')"
   assert_no_file "and no lock is left" "$H/.sharkswap/.identity.lock"
 
   # The backup file cannot be made. A Mac takes a credentials path that is no file
@@ -140,11 +143,14 @@ s_switch() {
     mv "$H/.claude" "$W/claude.kept"
     : > "$H/.claude"
     cs work
+    # Checked before the directory is put back, for the same reason as above.
+    assert_eq "and the file in place of .claude is left alone" "1" "$(find "$H/.claude" -maxdepth 0 -type f -empty | wc -l | tr -d ' ')"
     rm -f "$H/.claude"
     mv "$W/claude.kept" "$H/.claude"
     assert_rc "a backup file that cannot be made stops the switch" 1
     assert_err_has "and the error says what and why" "could not back up live credentials $H/.claude/.credentials.json: cannot make a backup file: Not a directory"
-    assert_eq "and the live login is still as it was" "$(fake_token 2)" "$(live_token)"
+    assert_eq "and the live account is still as it was" "bob@example.com" "$(live_email)"
+    assert_eq "and no backup file is left" "0" "$(find "$H" \( -name '*.backup.*' -o -name '*.switch-backup.*' \) | wc -l | tr -d ' ')"
     assert_no_file "and no lock is left" "$H/.sharkswap/.identity.lock"
   elif [[ "$(id -u)" != 0 ]]; then
     rm -f "$H/.claude/.claude.json"
@@ -154,7 +160,11 @@ s_switch() {
     assert_rc "a backup file that cannot be made stops the switch" 1
     assert_err_has "and the error says what and why" "could not back up live credentials $H/.claude/.credentials.json: cannot make a backup file: Permission denied"
     assert_eq "and the live login is still as it was" "$(fake_token 2)" "$(live_token)"
+    assert_eq "and the live account is still as it was" "bob@example.com" "$(live_email)"
+    assert_eq "and no backup file is left" "0" "$(find "$H" \( -name '*.backup.*' -o -name '*.switch-backup.*' \) | wc -l | tr -d ' ')"
     assert_no_file "and no lock is left" "$H/.sharkswap/.identity.lock"
+  else
+    printf '  skip a backup file that cannot be made (root on macOS: no file mode binds root there)\n'
   fi
 }
 
