@@ -166,7 +166,8 @@ impl Ctx {
             }
             rm_f(&backup);
             return Err(format!(
-                "credentials write failed: {}; restored prior state where possible",
+                "credentials write to {} failed: {}; restored prior state where possible",
+                self.creds.display(),
                 os_msg(&e)
             ));
         }

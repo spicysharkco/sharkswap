@@ -76,7 +76,7 @@ pub fn state(store: &Path) -> Pending {
 /// The owner is read again after the liveness check. A lock that changed hands
 /// in between (one switch ended and the next began, so a marker is there either
 /// way) is looked at afresh, a few times; one that never holds still counts as
-/// cut short, the answer that refuses.
+/// cut short, the answer that refuses, unless the marker is gone by then.
 fn state_with(store: &Path, mut read_owner: impl FnMut() -> String) -> Pending {
     for _ in 0..3 {
         if !pending(store) {
@@ -97,7 +97,12 @@ fn state_with(store: &Path, mut read_owner: impl FnMut() -> String) -> Pending {
             Pending::Interrupted
         };
     }
-    Pending::Interrupted
+    // The last try saw the owner change again; the switch may have ended in it.
+    if pending(store) {
+        Pending::Interrupted
+    } else {
+        Pending::Clear
+    }
 }
 
 /// The pid of an owner line (`pid=<N> started=<ISO>`); none that is not a
@@ -423,6 +428,19 @@ mod tests {
         });
         assert_eq!(seen, Pending::Interrupted);
         assert!(n <= 8, "the retries are bounded: {n} reads");
+
+        // The switch ended during the last try: the marker is gone by the final
+        // read, so nothing is pending, and nothing may be called unfinished.
+        let mut n = 0;
+        let seen = state_with(&store, || {
+            n += 1;
+            if n == 6 {
+                clear(&store).expect("the switch ends");
+            }
+            format!("pid={} started={n}", holder.id())
+        });
+        assert_eq!(seen, Pending::Clear);
+        assert_eq!(n, 6, "three tries, two reads each");
         end(holder);
     }
 

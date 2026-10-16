@@ -119,17 +119,34 @@ s_switch() {
   assert_no_file "and the stopped switch leaves no lock" "$H/.sharkswap/.identity.lock"
 
   # The live credentials cannot be backed up before a switch: it says why. File
-  # modes do not bind root, so these two need another user.
-  if [[ "$(id -u)" != 0 ]]; then
-    new_world backupwhy
-    save_as work alice@example.com 1
-    save_as personal bob@example.com 2
-    chmod 000 "$H/.claude/.credentials.json"
+  # modes do not bind root, so no failure here rests on one: the credentials are
+  # over the size cap, and the place for the backup is not a directory.
+  new_world backupwhy
+  save_as work alice@example.com 1
+  save_as personal bob@example.com 2
+  cp "$H/.claude/.credentials.json" "$W/credentials.kept"
+  perl -e 'truncate($ARGV[0], 64 * 1024 * 1024 + 1) or die "truncate: $!"' "$H/.claude/.credentials.json"
+  cs work
+  cp "$W/credentials.kept" "$H/.claude/.credentials.json"
+  assert_rc "credentials that cannot be copied stop the switch" 1
+  assert_err_has "and the error says what and why" "could not back up live credentials $H/.claude/.credentials.json: cannot copy it: larger than the size cap"
+  assert_eq "and the live login is as it was" "$(fake_token 2)" "$(live_token)"
+  assert_no_file "and no lock is left" "$H/.sharkswap/.identity.lock"
+
+  # The backup file cannot be made. A Mac takes a credentials path that is no file
+  # for the Keychain, which this error never reaches, so there only a directory
+  # that cannot be written will do, and root can write to any: that needs another user.
+  if [[ "$(uname -s)" != Darwin ]]; then
+    mv "$H/.claude" "$W/claude.kept"
+    : > "$H/.claude"
     cs work
-    chmod 600 "$H/.claude/.credentials.json"
-    assert_rc "credentials that cannot be copied stop the switch" 1
-    assert_err_has "and the error says what and why" "could not back up live credentials $H/.claude/.credentials.json: cannot copy it: Permission denied"
-    assert_eq "and the live login is as it was" "$(fake_token 2)" "$(live_token)"
+    rm -f "$H/.claude"
+    mv "$W/claude.kept" "$H/.claude"
+    assert_rc "a backup file that cannot be made stops the switch" 1
+    assert_err_has "and the error says what and why" "could not back up live credentials $H/.claude/.credentials.json: cannot make a backup file: Not a directory"
+    assert_eq "and the live login is still as it was" "$(fake_token 2)" "$(live_token)"
+    assert_no_file "and no lock is left" "$H/.sharkswap/.identity.lock"
+  elif [[ "$(id -u)" != 0 ]]; then
     rm -f "$H/.claude/.claude.json"
     chmod 500 "$H/.claude"
     cs work
@@ -599,12 +616,26 @@ s_switch_live() {
   assert_rc "live: a long owner line: the wait times out" 1
   assert_err_has "live: and the timeout shows the start of the line" "identity lock timed out (owner: pid=$HOLDER_PID xxxx"
   assert_err_has "live: cut, and says so" "xxx...); refusing to steal it"
-  assert_out_lacks "live: without the control characters" "$(printf '\033')"
-  assert_out_lacks "live: or the second line" "second"
   cs status
   assert_err_has "live: the refusal shows the start of the line" "in progress (owner: pid=$HOLDER_PID xxxx"
   assert_err_has "live: cut, and says so" "xxx...); try again when it finishes"
-  assert_out_lacks "live: without the control characters either" "$(printf '\033')"
+
+  # A control character, a non-ASCII character and a second line, all inside the
+  # cut, are dropped; the printable text around them stays.
+  printf 'pid=%s al\033[31mice\303\251 \007bell\nsecond\n' "$HOLDER_PID" > "$lock/owner"
+  CS_ENV=(SHARKSWAP_LOCK_ATTEMPTS=2 SHARKSWAP_LOCK_DELAY=0.05)
+  cs save extra
+  CS_ENV=()
+  assert_rc "live: a short owner line with control characters: the wait times out" 1
+  assert_err_has "live: and the timeout keeps its printable text" "identity lock timed out (owner: pid=$HOLDER_PID al[31mice bell); refusing to steal it"
+  assert_out_lacks "live: without the escape" "$(printf '\033')"
+  assert_out_lacks "live: or the bell" "$(printf '\007')"
+  assert_out_lacks "live: or the non-ASCII character" "$(printf '\303\251')"
+  assert_out_lacks "live: or the second line" "second"
+  cs status
+  assert_err_has "live: the refusal keeps its printable text" "in progress (owner: pid=$HOLDER_PID al[31mice bell); try again when it finishes"
+  assert_out_lacks "live: without the escape either" "$(printf '\033')"
+  assert_out_lacks "live: or the second line either" "second"
   printf 'pid=%s started=2026-01-01T00:00:00Z\n' "$HOLDER_PID" > "$lock/owner"
 
   # The status line never reads the owner file and infers nothing under a marker.
