@@ -1445,19 +1445,22 @@ fn xdg(var: &str, home: &Path, fallback: &str) -> String {
     }
 }
 
-/// Whether an unfinished account switch is recorded; if so, the run says it
-/// cannot go on (`to` names the target of a switch this run made, `doing` what
-/// the run was about to do). The live login is uncertain, so a rotation neither
-/// trusts it nor writes anything down about it.
+/// Whether an account switch is recorded as running or cut short; if so, the
+/// run says it cannot go on (`to` names the target of a switch this run made,
+/// `doing` what the run was about to do). The live login is uncertain, so a
+/// rotation neither trusts it nor writes anything down about it.
 fn unfinished_switch(ctx: &Ctx, run: &Run, to: &str, doing: &str) -> bool {
-    if !switch_intent::pending(&ctx.store) {
-        return false;
+    match switch_intent::state(&ctx.store) {
+        switch_intent::Pending::Clear => false,
+        switch_intent::Pending::InProgress(owner) => {
+            run.error(&switch_intent::in_progress_text(&owner));
+            true
+        }
+        switch_intent::Pending::Interrupted => {
+            run.error(&switch_intent::unfinished_text(&ctx.store, to, doing));
+            true
+        }
     }
-    run.error(&format!(
-        "unfinished account switch{to}; inspect the identity lock at {} before {doing}",
-        switch_intent::lock_dir(&ctx.store).display()
-    ));
-    true
 }
 
 pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {

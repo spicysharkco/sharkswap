@@ -564,6 +564,9 @@ pub fn avail_record(ctx: &Ctx, obs: &[Obs]) -> Result<(), ()> {
 // ---- the command ---------------------------------------------------------------
 
 pub fn cmd_probe(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
+    // Readings cannot be recorded while a switch is running or was cut short
+    // (see avail_record), so say so before any request is sent.
+    crate::switch_intent::ready(&ctx.store)?;
     let mut aliases: Vec<String> = Vec::new();
     let mut from_token = std::collections::BTreeSet::new();
     let named = !args.is_empty();

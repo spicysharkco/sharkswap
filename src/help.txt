@@ -14,11 +14,14 @@ the store by logging into each account once and running: sharkswap save <alias>
 
 An interrupted switch (a signal, a failed write) leaves
 ~/.sharkswap/.identity.lock/switch-pending and the lock itself. Until you clear it,
-status, switching, rotate, save, remove and pane refuse with "unfinished account
-switch", list marks no account active, and bar prints "no account". To clear:
-stop users of the global login, look at the lock and any *.backup.* files it names,
-rm -rf ~/.sharkswap/.identity.lock, run sharkswap <alias>, then sharkswap status.
-(README: An interrupted switch)
+status, switching, rotate, save, remove, pane and probe refuse with "unfinished
+account switch", list marks no account active, and bar prints "no account". While
+a switch is still running (the process named in the lock's owner file is alive)
+they refuse with "an account switch is in progress ... try again when it
+finishes" instead, and a command that waits for the lock waits. To clear an
+interrupted one: stop users of the global login, look at the lock and any
+*.backup.* files it names, rm -rf ~/.sharkswap/.identity.lock, run sharkswap
+<alias>, then sharkswap status. (README: An interrupted switch)
 
 Usage:
   sharkswap                    overview: active account, then every saved account

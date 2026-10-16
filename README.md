@@ -308,9 +308,10 @@ While `switch-pending` exists:
 
 - `cs status`, `cs` (the overview), `cs <alias>`, `cs next`, `cs best --switch`, `cs rotate`
   (also with `--dry-run`), `cs save`, `cs remove`, `cs pane`, the autosave of `cs watch`
-  and the availability record of `cs probe` all refuse. They print "unfinished account
-  switch" and name the lock directory, at once and not after waiting for the lock to
-  time out.
+  and `cs probe` all refuse. `cs probe` refuses before it sends a request. They print
+  "unfinished account switch" and name the lock directory, at once and not after
+  waiting for the lock to time out. (A switch that is still running is told apart
+  below.)
 - `cs list` still shows the saved accounts but marks none of them active, and `cs best`
   ranks them as before.
 - `cs bar` with no alias prints `sharkswap: no account` instead of inferring one from
@@ -323,6 +324,31 @@ While `switch-pending` exists:
 Only the existence of the file is checked. It is looked at with `lstat` and never
 opened or read, so an empty file, a directory, a dangling link or a named pipe in its
 place counts the same, and the status-line command `cs bar` cannot block on it.
+
+### A switch that is still running
+
+The file also exists for the few moments a healthy switch takes, while that `cs` holds
+the lock. A command that meets it then must not send you to remove a lock that is in
+use. So when the file exists, `cs` also reads the lock's `owner` file, a line
+`pid=<N> started=<ISO time>`, and asks the system whether process N is alive (`kill(N, 0)`;
+"not permitted" counts as alive):
+
+- Alive: the switch is in progress. `cs status`, `cs`, `cs <alias>`, `cs next`,
+  `cs toggle`, `cs best --switch`, `cs rotate` and `cs probe` refuse at once with "an
+  account switch is in progress (owner: pid=N started=...); try again when it finishes"
+  and say nothing about removing the lock. `cs save`, `cs remove`, `cs pane` and the
+  autosave of `cs watch` take the identity lock, so they wait for it as they wait for any
+  holder, and give "identity lock timed out" only after the usual 5 s.
+- Gone, or no usable pid in `owner` (missing, empty, not `pid=<N>`, zero or negative):
+  the switch was cut short. This is the "unfinished account switch" state and the rest
+  of this section applies.
+
+The owner file is read with the same bounded, non-blocking read as every file in the
+store, and only when the marker exists. `cs bar` never reads it: it stays `lstat` only
+and shows no inferred account while the marker exists, running or not. A process id can be
+reused, so a holder that died may look alive for a while; that only turns the
+"unfinished" refusal into "in progress" or a lock timeout, still a refusal, and the
+lock is still never stolen.
 
 There is no command that clears the state, on purpose: a person has to look first.
 

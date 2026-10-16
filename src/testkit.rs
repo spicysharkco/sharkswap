@@ -157,3 +157,32 @@ pub fn within_deadline<T: Send + 'static>(
         }
     }
 }
+
+/// A process that stays alive until the test kills it: the holder of a lock.
+pub fn sleeper() -> std::process::Child {
+    // A fork between another test's script write and its exec breaks that exec.
+    let _spawn = spawn_lock();
+    std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("a sleep process")
+}
+
+/// Stops a process this test started, and collects it.
+pub fn end(mut child: std::process::Child) {
+    child.kill().expect("kill our own child");
+    child.wait().expect("wait for it");
+}
+
+/// The identity lock as a running switch leaves it: the owner file names `pid`,
+/// and the switch-intent marker is in place.
+pub fn lock_of_running_switch(store: &Path, pid: u32) {
+    let dir = crate::switch_intent::lock_dir(store);
+    std::fs::create_dir(&dir).expect("a lock directory");
+    std::fs::write(
+        dir.join("owner"),
+        format!("pid={pid} started=2026-01-01T00:00:00Z\n"),
+    )
+    .expect("an owner file");
+    crate::switch_intent::publish(store, "work").expect("the marker");
+}

@@ -414,7 +414,162 @@ s_switch_intent() {
     assert_rc "a $kind marker: status refuses" 1
     CS_WRAP=()
   done
+
+  # The owner file is read (to tell a switch that is running from one that was cut
+  # short) only by the commands that refuse, never by bar, and never in a way that
+  # waits: a named pipe, a directory, text that holds no pid and a pid of 0 all
+  # leave the marker unfinished.
+  rm -rf "${lock:?}"; mkdir -p "$lock"; : > "$marker"
+  local owner="$lock/owner"
+  for kind in fifo directory nopid zero negative; do
+    rm -rf "${owner:?}"
+    case "$kind" in
+      fifo) mkfifo "$owner" ;;
+      directory) mkdir "$owner" ;;
+      nopid) echo "started=2026-01-01T00:00:00Z" > "$owner" ;;
+      zero) echo "pid=0 started=2026-01-01T00:00:00Z" > "$owner" ;;
+      negative) echo "pid=-1 started=2026-01-01T00:00:00Z" > "$owner" ;;
+    esac
+    CS_WRAP=()
+    command -v timeout >/dev/null 2>&1 && CS_WRAP=(timeout 20)
+    cs status
+    assert_rc "a $kind owner: status refuses" 1
+    assert_err_has "a $kind owner: as an unfinished switch" "unfinished account switch"
+    cs save extra
+    assert_rc "a $kind owner: save refuses without waiting" 1
+    assert_err_has "a $kind owner: as an unfinished switch" "unfinished account switch"
+    cs bar
+    assert_rc "a $kind owner: bar returns" 0
+    assert_out_has "a $kind owner: and infers no account" "no account"
+    CS_WRAP=()
+  done
   rm -rf "${lock:?}"
+  stub_stop
+}
+
+# Starts a live process and makes it the holder of an identity lock that carries a
+# switch-in-progress marker, as a running switch leaves it. HOLDER_PID is the pid.
+HOLDER_PID=""
+live_holder() {
+  local lock="$H/.sharkswap/.identity.lock"
+  sleep 60 &
+  HOLDER_PID=$!
+  rm -rf "${lock:?}"; mkdir -p "$lock"
+  printf 'pid=%s started=2026-01-01T00:00:00Z\n' "$HOLDER_PID" > "$lock/owner"
+  printf 'personal\n' > "$lock/switch-pending"
+}
+
+# The holder finished: the marker, then the lock, go.
+holder_done() {
+  local lock="$H/.sharkswap/.identity.lock"
+  rm -f "${lock:?}/switch-pending"
+  rm -rf "${lock:?}"
+}
+
+# The holder died or was killed, leaving the marker behind. Only its own pid is
+# ever signalled.
+holder_dies() {
+  kill "$HOLDER_PID" 2>/dev/null || true
+  { wait "$HOLDER_PID"; } 2>/dev/null || true
+  HOLDER_PID=""
+}
+
+# A switch that is running (its process is alive) is not an interrupted one: the
+# commands that need the lock wait for it as they wait for any holder, the others
+# say that a switch is in progress, and neither tells anyone to remove the lock.
+s_switch_live() {
+  section "a switch that is running"
+  new_world live
+  save_as work alice@example.com 1
+  save_as personal bob@example.com 2
+  stub_start
+  stub_route 1 work 200 "$(rl_headers 0.10 0.20)"
+  stub_route 2 personal 200 "$(rl_headers 0.10 0.20)"
+  cs probe
+  local lock="$H/.sharkswap/.identity.lock" st posts
+  posts="$(grep -c '^POST /v1/messages' "$STUB_LOG" || true)"
+  live_holder
+
+  # Not waiting for the lock: they refuse at once, with the holder named.
+  for st in "status" "" "work" "next" "best --switch" "probe" "rotate --dry-run" "rotate"; do
+    # shellcheck disable=SC2086  # the words of one command line
+    cs $st
+    assert_rc "live '$st': refuses" 1
+    assert_err_has "live '$st': says a switch is in progress" "an account switch is in progress (owner: pid=$HOLDER_PID started="
+    assert_err_has "live '$st': and to try again" "try again when it finishes"
+    assert_out_lacks "live '$st': and does not call it unfinished" "unfinished account switch"
+    assert_out_lacks "live '$st': or advise removing the lock" "rm -rf"
+  done
+  assert_eq "live: probe sent no request" "$posts" "$(grep -c '^POST /v1/messages' "$STUB_LOG" || true)"
+  assert_eq "live: the marker is untouched" "personal" "$(cat "$lock/switch-pending")"
+
+  # The lock is waited for within its patience, then the usual timeout message.
+  CS_ENV=(SHARKSWAP_LOCK_ATTEMPTS=4 SHARKSWAP_LOCK_DELAY=0.05)
+  for st in "save extra" "remove work" "pane work"; do
+    # shellcheck disable=SC2086
+    cs $st
+    assert_rc "live '$st': times out" 1
+    assert_err_has "live '$st': with the usual message" "identity lock timed out (owner: pid=$HOLDER_PID started="
+    assert_out_lacks "live '$st': and not as an unfinished switch" "unfinished account switch"
+  done
+  CS_ENV=(WATCH_INTERVAL=bad SHARKSWAP_LOCK_ATTEMPTS=4 SHARKSWAP_LOCK_DELAY=0.05)
+  cs watch
+  CS_ENV=()
+  assert_err_has "live: a watch pass waits and times out" "identity lock timed out (owner: pid=$HOLDER_PID"
+  assert_out_lacks "live: and not as an unfinished switch" "unfinished account switch"
+  assert_file "live: the holder's lock is untouched" "$lock/owner"
+  assert_file "live: so is its marker" "$lock/switch-pending"
+
+  # The status line never reads the owner file and infers nothing under a marker.
+  cs bar
+  assert_rc "live: bar returns" 0
+  assert_out_has "live: and infers no account" "no account"
+
+  # A waiter gets the lock when the holder finishes.
+  mk_login carol@example.com 3
+  CS_ENV=(SHARKSWAP_LOCK_ATTEMPTS=200 SHARKSWAP_LOCK_DELAY=0.1)
+  cs_bg save extra
+  CS_ENV=()
+  sleep 1
+  if kill -0 "$BG_PID" 2>/dev/null; then pass "live: the waiter is still waiting a second later"
+  else fail "live: the waiter is still waiting a second later" "it ended: $(cat "$W/bg-err.txt")"; fi
+  holder_done
+  RC=0; wait "$BG_PID" || RC=$?
+  OUT="$(cat "$W/bg-out.txt")"; ERR="$(cat "$W/bg-err.txt")"
+  assert_rc "live: the waiter then takes the lock and saves" 0
+  assert_out_lacks "live: without a complaint" "unfinished account switch"
+  assert_file "live: the account was saved" "$H/.sharkswap/extra.json"
+  holder_dies
+
+  # A holder that dies while someone waits turns the wait into the unfinished
+  # state: the next look at the lock finds it cut short.
+  live_holder
+  CS_ENV=(SHARKSWAP_LOCK_ATTEMPTS=200 SHARKSWAP_LOCK_DELAY=0.1)
+  cs_bg save extra2
+  CS_ENV=()
+  sleep 1
+  if kill -0 "$BG_PID" 2>/dev/null; then pass "live: a second waiter is waiting"
+  else fail "live: a second waiter is waiting" "it ended: $(cat "$W/bg-err.txt")"; fi
+  holder_dies
+  RC=0; wait "$BG_PID" || RC=$?
+  OUT="$(cat "$W/bg-out.txt")"; ERR="$(cat "$W/bg-err.txt")"
+  assert_rc "live: the waiter stops when the holder dies" 1
+  assert_err_has "live: as an unfinished switch" "unfinished account switch; inspect the identity lock at $lock"
+  assert_no_file "live: and saved nothing" "$H/.sharkswap/extra2.json"
+
+  # With the holder gone the marker is an interrupted switch to every command.
+  for st in "status" "" "work" "probe"; do
+    # shellcheck disable=SC2086
+    cs $st
+    assert_rc "dead '$st': refuses" 1
+    assert_err_has "dead '$st': as an unfinished switch" "unfinished account switch; inspect the identity lock at $lock"
+    assert_out_lacks "dead '$st': not as a running one" "in progress"
+  done
+  cs save extra3
+  assert_rc "dead: save refuses at once" 1
+  assert_err_has "dead: as an unfinished switch" "unfinished account switch"
+  rm -rf "${lock:?}"
+  stub_stop
 }
 
 # A rotation whose own switch is cut short must not write down a switch or a
@@ -1228,7 +1383,7 @@ s_fifo_store() {
   stub_stop
 }
 
-for scenario in s_save_and_list s_switch s_keychain_path s_switch_intent s_switch_intent_rotate s_pane s_token s_probe s_gate s_best_and_bar s_rotate s_rotate_notes s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
+for scenario in s_save_and_list s_switch s_keychain_path s_switch_intent s_switch_intent_rotate s_switch_live s_pane s_token s_probe s_gate s_best_and_bar s_rotate s_rotate_notes s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
   "$scenario"
 done
 summary

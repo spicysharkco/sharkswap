@@ -922,6 +922,11 @@ static LOCK_PATHS: OnceLock<(std::ffi::CString, std::ffi::CString, std::ffi::CSt
     OnceLock::new();
 static LOCK_HELD: AtomicBool = AtomicBool::new(false);
 
+/// Whether this process holds the identity lock right now.
+pub fn lock_held_here() -> bool {
+    LOCK_HELD.load(Ordering::SeqCst)
+}
+
 /// Whether `path` exists as itself (a link is not followed). `lstat` is
 /// async-signal-safe, so the signal handler may ask.
 fn exists_lstat(path: &std::ffi::CStr) -> bool {
@@ -985,8 +990,9 @@ impl IdLock {
         let (tries, delay) = lock_patience();
         let (mut i, mut hard) = (0i64, 0u32);
         loop {
-            // An unfinished switch holds the lock until a person has looked.
-            crate::switch_intent::ready(&ctx.store)?;
+            // A switch that was cut short holds the lock until a person has
+            // looked. One that is still running is waited for like any holder.
+            crate::switch_intent::ready_to_wait(&ctx.store)?;
             let err: String;
             match std::fs::create_dir(&dir) {
                 Ok(()) => match std::fs::OpenOptions::new()
@@ -1104,7 +1110,9 @@ impl Drop for IdLock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testkit::{TestStore, disposition, signal_lock, spawn_lock};
+    use crate::testkit::{
+        TestStore, disposition, end, lock_of_running_switch, signal_lock, sleeper, spawn_lock,
+    };
     use serde_json::json;
     use std::os::unix::fs::MetadataExt;
     use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -1678,6 +1686,32 @@ mod tests {
         IdLock::acquire(&ctx)
             .unwrap_or_else(|_| panic!("free again"))
             .done();
+    }
+
+    #[test]
+    fn a_waiter_meets_a_running_switch_and_takes_the_lock_when_it_ends() {
+        let _serial = signal_lock();
+        let home = TestStore::new(&[]);
+        let ctx = Ctx::at(home.to_path_buf(), true).unwrap_or_else(|_| panic!("a context"));
+        let holder = sleeper();
+        lock_of_running_switch(&ctx.store, holder.id());
+        let dir = crate::switch_intent::lock_dir(&ctx.store);
+        let marker = crate::switch_intent::marker(&ctx.store);
+        let finisher = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            std::fs::remove_file(marker).expect("the marker goes first");
+            std::fs::remove_dir_all(dir).expect("then the lock");
+        });
+        let started = std::time::Instant::now();
+        let lock = IdLock::acquire(&ctx)
+            .unwrap_or_else(|_| panic!("the waiter should wait for a live switch, not refuse"));
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(300),
+            "it really waited for the holder"
+        );
+        lock.done();
+        finisher.join().expect("the finisher");
+        end(holder);
     }
 
     #[test]
