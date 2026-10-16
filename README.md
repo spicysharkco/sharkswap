@@ -66,7 +66,8 @@ the archive for your system and the `SHA256SUMS` file:
 
 The Linux binaries are statically linked, so they run on any distribution. Check the
 archive, unpack it and install. The example is version 1.0.0 for Apple silicon; set `a`
-to the archive name for your version and system from the table above:
+to the archive name for your version and system from the table above, without
+`.tar.gz`:
 
 ```sh
 a=sharkswap-1.0.0-aarch64-apple-darwin
@@ -88,8 +89,8 @@ your archive, so this also works with BusyBox. `gh attestation verify`
 downloaded, built the archive; it reads the attestation through the GitHub API, so run
 `gh auth login` first. `install.sh` copies the binary to `~/.local/bin` and adds a `cs`
 link; it takes `--prefix DIR` and `--uninstall` as described below. To install by hand
-instead, run `mkdir -p ~/.local/bin`, copy `sharkswap` there (it must be on your `PATH`)
-and link `cs` next to it: `ln -s sharkswap ~/.local/bin/cs`. If you use `cargo-binstall`,
+instead, run `mkdir -p ~/.local/bin`, copy `sharkswap` there (that directory must be on
+your `PATH`) and link `cs` next to it: `ln -s sharkswap ~/.local/bin/cs`. If you use `cargo-binstall`,
 `cargo binstall --git https://github.com/spicysharkco/sharkswap sharkswap` clones the
 repository, reads the version from `Cargo.toml` on the default branch and downloads that
 version's archive (so it can be newer than the latest release; if that version has no
@@ -142,30 +143,19 @@ are supported; there is no Windows support.
 A token can only be captured while its account is the active login, so build the
 store by logging in to each account once.
 
-```sh
-# 1. In Claude Code, run /login as your first account, then:
-cs save work
-
-# 2. /login as the second account, then:
-cs save personal
-
-# 3. See them all.
-cs
-
-# 4. Switch.
-cs work
-cs personal
-# Or round-robin, skipping any account over its ceiling:
-cs next
-```
+1. In Claude Code, run `/login` as your first account, then `cs save work`.
+2. Run `/login` as the second account, then `cs save personal`.
+3. `cs` on its own shows them all.
+4. Switch with `cs work` or `cs personal`, or with `cs next`, which goes round-robin
+   and skips any account over its ceiling.
 
 After a switch, start a new `claude` session. A session that is already running may
 keep the account it started with.
 
-Two accounts in two terminals at once:
+Two accounts in two terminals at once: after `eval "$(cs pane work)"`, this shell uses
+`work`, in its own config directory.
 
 ```sh
-# This shell now uses work, in its own config directory:
 eval "$(cs pane work)"
 claude
 ```
@@ -500,15 +490,15 @@ per-call cost matters.
 ## Tests
 
 ```sh
-# Unit tests:
 cargo test --locked
-# The same, with the hooks compiled in:
 cargo test --locked --features test-hooks
-# Build target/test-hooks/ with the hooks, then run the black-box tests:
 bash test/run.sh
-# Or run them against another build that has the hooks:
-CS_BIN=/path/to/sharkswap bash test/run.sh
 ```
+
+The first runs the unit tests, the second the same with the hooks compiled in.
+`bash test/run.sh` builds `target/test-hooks/` with the hooks, then runs the black-box
+tests; `CS_BIN=/path/to/sharkswap bash test/run.sh` runs them against another build
+that has the hooks.
 
 `test/run.sh` runs the unit tests of the write-containment checker, the end-to-end
 tests of the command line, and then the end-to-end tests again under `strace` to check
