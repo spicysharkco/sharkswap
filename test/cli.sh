@@ -897,7 +897,28 @@ s_gate() {
   assert_no_file "no copy was made" "$H/.sharkswap/work-copy.json"
   cs save work-copy --force
   assert_rc "save --force" 0
+  assert_file "and it makes the copy" "$H/.sharkswap/work-copy.json"
   cs remove work-copy
+
+  # While a switch to the capped login is running, the live login is hidden and
+  # the save waits for the lock; it must read the login after the wait, not before.
+  mk_login carol@example.com 3
+  live_holder
+  mk_login alice@example.com 1
+  CS_ENV=(SHARKSWAP_LOCK_ATTEMPTS=200 SHARKSWAP_LOCK_DELAY=0.1)
+  cs_bg save late-copy
+  CS_ENV=()
+  sleep 1
+  if kill -0 "$BG_PID" 2>/dev/null; then pass "a save during the switch waits for it"
+  else fail "a save during the switch waits for it" "it ended: $(cat "$W/bg-err.txt")"; fi
+  holder_done
+  RC=0; wait "$BG_PID" || RC=$?
+  OUT="$(cat "$W/bg-out.txt")"; ERR="$(cat "$W/bg-err.txt")"
+  assert_rc "the save then sees the capped login and is refused with 75" 75
+  assert_err_has "and the holder is named" "already saved as 'work'"
+  assert_no_file "no second name was made" "$H/.sharkswap/late-copy.json"
+  assert_no_file "and the lock was let go" "$H/.sharkswap/.identity.lock"
+  holder_dies
 
   rm -f "$H/.sharkswap/availability.json"
   cs work

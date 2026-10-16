@@ -363,7 +363,10 @@ pub fn cmd_save(ctx: &Ctx, args: &[String]) -> Res {
     }
     check_alias(&alias, false)?;
     alias_exact(&alias, &[&ctx.store, &ctx.tokens])?;
+    let lock = IdLock::acquire(ctx)?;
     // A login already saved under a capped alias is not saved again under another name.
+    // The live login is read under the lock: a running switch hides it until it ends.
+    // A refusal below drops the lock.
     let live_email = ctx.current_email();
     let holder = if live_email.is_empty() {
         None
@@ -388,7 +391,6 @@ pub fn cmd_save(ctx: &Ctx, args: &[String]) -> Res {
             return Err(75);
         }
     }
-    let lock = IdLock::acquire(ctx)?;
     let meta_dst = ctx.meta(&alias);
     let creds_dst = ctx.snap(&alias);
     let block = read_last_json(&ctx.files[0])
