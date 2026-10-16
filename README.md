@@ -68,25 +68,37 @@ The Linux binaries are statically linked, so they run on any distribution. Check
 archive, unpack it and install (the example is version 1.0.0 for Apple silicon):
 
 ```sh
-shasum -a 256 -c SHA256SUMS --ignore-missing
-gh attestation verify sharkswap-1.0.0-aarch64-apple-darwin.tar.gz --repo spicysharkco/sharkswap
+shasum -a 256 -c --ignore-missing SHA256SUMS    # macOS
+sha256sum -c --ignore-missing SHA256SUMS        # Linux
+gh attestation verify sharkswap-1.0.0-aarch64-apple-darwin.tar.gz --repo spicysharkco/sharkswap \
+  --signer-workflow spicysharkco/sharkswap/.github/workflows/release.yml \
+  --source-ref refs/tags/v1.0.0
 tar -xzf sharkswap-1.0.0-aarch64-apple-darwin.tar.gz
+xattr -dr com.apple.quarantine sharkswap-1.0.0-aarch64-apple-darwin    # macOS, browser download only
 cd sharkswap-1.0.0-aarch64-apple-darwin
 ./install.sh --binary ./sharkswap    # copies the binary to ~/.local/bin and adds a cs link
 ```
 
-`shasum` checks that the download is intact. `gh attestation verify` (GitHub CLI)
-checks that GitHub Actions built the archive from this repository. `install.sh` takes
-`--prefix DIR` and `--uninstall` as described below. To install by hand instead, put
-`sharkswap` in a directory on your `PATH` and link `cs` to it:
-`ln -s sharkswap ~/.local/bin/cs`. If you use `cargo-binstall`,
-`cargo binstall --git https://github.com/spicysharkco/sharkswap sharkswap` fetches the
-same archive (it installs `sharkswap` only, with no `cs` link).
+`shasum` and `sha256sum` check that the download is intact. `gh attestation verify`
+(GitHub CLI) checks that this repository's release workflow, run for the tag you
+downloaded, built the archive; it reads the attestation through the GitHub API, so run
+`gh auth login` first. `install.sh` takes `--prefix DIR` and `--uninstall` as described
+below. To install by hand instead, put `sharkswap` in a directory on your `PATH` and link
+`cs` to it: `ln -s sharkswap ~/.local/bin/cs`. If you use `cargo-binstall`,
+`cargo binstall --git https://github.com/spicysharkco/sharkswap sharkswap` clones the
+repository, reads the version from `Cargo.toml` on the default branch and downloads that
+version's archive (so it can be newer than the latest release; if that version has no
+archive, binstall builds from source). It installs `sharkswap` only, with no `cs` link,
+and checks neither `SHA256SUMS` nor the attestation.
 
-The macOS binaries are not notarised by Apple. If a browser download is blocked ("cannot
-be opened because the developer cannot be verified"), clear the quarantine flag on the
-unpacked directory with `xattr -dr com.apple.quarantine sharkswap-1.0.0-aarch64-apple-darwin`.
-A download made with `curl` or `gh release download` is not flagged.
+The macOS binaries are not notarised by Apple. A browser download is quarantined, the
+flag follows the files through `tar`, `cp` and `install`, and Gatekeeper then refuses to
+run the binary ("Apple could not verify “sharkswap” is free of malware that may harm
+your Mac or compromise your privacy" on macOS 15 and later, "cannot be opened because
+the developer cannot be verified" before). `install.sh` runs the binary to check it, so
+it would stop with "not a sharkswap binary". The `xattr` line between `tar` and `cd`
+clears the flag on the unpacked directory first. A download made with `curl` or
+`gh release download` is not flagged, and that line changes nothing.
 
 ### With cargo
 

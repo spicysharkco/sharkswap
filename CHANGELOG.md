@@ -36,7 +36,7 @@ switches between several Claude Code accounts without logging in again.
 - Prebuilt binaries on the releases page for macOS (Apple silicon and Intel) and Linux
   (x86-64 and ARM64, statically linked), with a `SHA256SUMS` file and build provenance
   attestations. Each archive carries `install.sh`, which installs the binary and the `cs`
-  link (`./install.sh --binary ./sharkswap`), and `cargo-binstall` can use the archives
-  too. `cargo install --locked --git` still builds from source.
+  link (`./install.sh --binary ./sharkswap`), and `cargo binstall --git` can use the
+  archives too. `cargo install --locked --git` still builds from source.
 
 [1.0.0]: https://github.com/spicysharkco/sharkswap/releases/tag/v1.0.0
