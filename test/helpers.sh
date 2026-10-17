@@ -284,19 +284,23 @@ stub_stop() {
   API_BASE_OVERRIDE=""
 }
 
-# stub_route TOKEN_N NAME STATUS [HEADERS_JSON [DELAY_MS]]: answer token N with STATUS.
+# stub_route TOKEN_N NAME STATUS [HEADERS_JSON [DELAY_MS [BODY_JSON]]]: answer
+# token N with STATUS.
 stub_route() {
-  local n="$1" name="$2" status="$3" headers="${4:-}" delay="${5:-0}"
+  local n="$1" name="$2" status="$3" headers="${4:-}" delay="${5:-0}" body="${6:-}"
   [[ -n "$headers" ]] || headers='{}'
-  stub_route_raw "$(fake_token "$n")" "$name" "$status" "$headers" "$delay"
+  stub_route_raw "$(fake_token "$n")" "$name" "$status" "$headers" "$delay" "" "$body"
 }
 
-# stub_route_raw TOKEN NAME STATUS HEADERS_JSON DELAY_MS [USAGE_STATUS]: the same
-# for any bearer string; USAGE_STATUS answers GET /api/oauth/usage (default 403).
+# stub_route_raw TOKEN NAME STATUS HEADERS_JSON DELAY_MS [USAGE_STATUS [BODY_JSON]]:
+# the same for any bearer string; USAGE_STATUS answers GET /api/oauth/usage
+# (default 403); BODY_JSON is the reply body (default {}).
 stub_route_raw() {
-  local tmp="$STUB_ROUTES.new"
+  local tmp="$STUB_ROUTES.new" body="${7:-}"
+  [[ -n "$body" ]] || body='{}'
   jq --arg t "$1" --arg name "$2" --argjson s "$3" --argjson h "$4" --argjson d "$5" --argjson u "${6:-403}" \
-    '.[$t] = {name:$name, status:$s, headers:$h, delayMs:$d, usageStatus:$u}' "$STUB_ROUTES" > "$tmp"
+    --argjson b "$body" \
+    '.[$t] = {name:$name, status:$s, headers:$h, delayMs:$d, usageStatus:$u, body:$b}' "$STUB_ROUTES" > "$tmp"
   mv "$tmp" "$STUB_ROUTES"
 }
 

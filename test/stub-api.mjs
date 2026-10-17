@@ -2,7 +2,10 @@
 // 127.0.0.1 only and answers POST /v1/messages and GET /api/oauth/usage from a
 // routes file, keyed by the bearer token the request carried:
 //
-//   { "<bearer token>": { "name": "work", "status": 200, "headers": {...}, "delayMs": 0 } }
+//   { "<bearer token>": { "name": "work", "status": 200, "headers": {...}, "body": {...}, "delayMs": 0 } }
+//
+// "headers" are sent as given (a list value repeats the header), and "body", which
+// defaults to {}, is sent as JSON.
 //
 // A token with no route gets 401. The log file gets one line per request,
 // "<METHOD> <PATH> <route name or ?> model=<model>", never the token itself.
@@ -38,7 +41,7 @@ const server = createServer((req, res) => {
       if (!route) { res.writeHead(401, { "content-type": "application/json" }); res.end("{}"); return; }
       const status = req.url.startsWith("/api/oauth/usage") ? (route.usageStatus ?? 403) : route.status ?? 200;
       res.writeHead(status, { "content-type": "application/json", ...(route.headers ?? {}) });
-      res.end("{}");
+      res.end(JSON.stringify(route.body ?? {}));
     };
     if (route?.delayMs) setTimeout(reply, route.delayMs); else reply();
   });

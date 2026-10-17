@@ -1345,14 +1345,86 @@ fn read_secret_line() -> String {
     line.trim_end_matches(['\n', '\r']).to_string()
 }
 
+/// Whether the API places `token` in the organization `alias` was saved with
+/// (`organizationUuid` in its metadata). A token made while another account was
+/// logged in would otherwise be filed under `alias`, and its probes would show
+/// that account's usage there. A different organization is refused (exit 75, like
+/// the other refusals `--force` lifts) unless `force`. When the two cannot be
+/// compared (the metadata names no valid organization id, the API did not answer
+/// or sent none, as it may for a 401 or 403) the token is still stored, with a
+/// note.
+fn check_token_org(ctx: &Ctx, alias: &str, token: &str, force: bool) -> Res {
+    let saved = read_json(&ctx.meta(alias))
+        .and_then(|v| v.get("organizationUuid").cloned())
+        .filter(|v| !v.is_null());
+    let Some(want) = saved.as_ref().and_then(|v| probe::org_id(v.as_str()?)) else {
+        let what = if saved.is_some() {
+            "no valid organization id"
+        } else {
+            "no organization"
+        };
+        eprintln!(
+            "note: the organization of this token was not checked: the login saved as '{alias}' names {what}"
+        );
+        return Ok(());
+    };
+    let reply = probe::ask(token);
+    let Some(got) = reply.org else {
+        match reply.http {
+            0 => eprintln!(
+                "note: the organization of this token was not checked: the API did not answer"
+            ),
+            401 => eprintln!(
+                "note: the API refused this token with 401; its organization was not checked and the token is stored anyway. Check that the whole token was pasted."
+            ),
+            403 => eprintln!(
+                "note: the API refused this token with 403; its organization was not checked."
+            ),
+            http => eprintln!(
+                "note: the organization of this token was not checked: the API answered {http} without an organization id"
+            ),
+        }
+        return Ok(());
+    };
+    if got == want {
+        if reply.http == 403 {
+            eprintln!(
+                "note: the API answered 403; the token is in the saved organization, but the account is refused now."
+            );
+        }
+        return Ok(());
+    }
+    if force {
+        eprintln!(
+            "override: --force stored the token for '{alias}' although the API places it in organization {got}, not {want}"
+        );
+        return Ok(());
+    }
+    eprintln!(
+        "error: this token belongs to organization {got}, but '{alias}' was saved with organization {want}; nothing stored"
+    );
+    eprintln!(
+        "  Either it was made while another account was logged in: log in to '{alias}', run 'claude setup-token' again and set that token."
+    );
+    eprintln!(
+        "  Or the organization of '{alias}' changed since 'sharkswap save' (for example it moved to a team plan): log in to it and run 'sharkswap save {alias}' again."
+    );
+    eprintln!(
+        "  To store it anyway: sharkswap token set --force {alias}   (the token is read from stdin again, as for any 'token set')"
+    );
+    Err(75)
+}
+
 pub fn cmd_token(ctx: &Ctx, args: &[String]) -> Res {
     let sub = args.first().map_or("", String::as_str);
     let rest = if args.is_empty() { args } else { &args[1..] };
     match sub {
         "set" => {
-            let alias = rest.first().cloned().unwrap_or_default();
+            let (alias, force) = alias_force(rest);
             if alias.is_empty() {
-                eprintln!("sharkswap: 1: usage: sharkswap token set <alias>   (token on stdin)");
+                eprintln!(
+                    "sharkswap: 1: usage: sharkswap token set [--force] <alias>   (token on stdin)"
+                );
                 return Err(1);
             }
             check_alias(&alias, false)?;
@@ -1376,6 +1448,7 @@ pub fn cmd_token(ctx: &Ctx, args: &[String]) -> Res {
                 );
                 return Err(1);
             }
+            check_token_org(ctx, &alias, &token, force)?;
             if std::fs::create_dir_all(&ctx.tokens).is_err()
                 || std::fs::set_permissions(
                     &ctx.tokens,

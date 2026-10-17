@@ -14,6 +14,8 @@ other programs and to the network in a few places, and all of them are listed he
 
 - Usage: `cs probe` (and `cs`, `cs status`, `cs best`, `cs bar` unless `QUICK=1`) make
   one one-token HTTPS request per account, from inside the process.
+- `cs token set <alias>` makes one one-token request with the new token, but only when
+  the alias's saved login names an organization (see "Setting a one-year token").
 - `cs token check` makes one more HTTPS request, to the usage endpoint, and runs
   `claude --version`. With `--model` it also runs `claude -p`, which makes a real model
   request through Claude Code.
@@ -178,7 +180,7 @@ claude
 | `cs best [--switch\|--raw]` | Rank saved accounts, most usable first. `--switch` moves to the top usable one. `--raw` prints tab-separated rows. |
 | `cs bar [alias]` | One status-bar line: `alias · 5h N% · wk N%`, plus age, login time left and any cap. |
 | `cs probe [alias...]` | Send one 1-token request per account and record 5-hour and weekly use from the response headers. |
-| `cs token set\|rm\|list\|check\|print <alias>` | Manage one-year tokens from `claude setup-token`. `set` reads the token from stdin. `check` asks the usage endpoint whether the token can read quota, and with `--model` sends one request through `claude -p`. `print` writes the token to standard output, only when that is not a terminal (see below). |
+| `cs token set\|rm\|list\|check\|print <alias>` | Manage one-year tokens from `claude setup-token`. `set [--force]` reads the token from stdin and checks its organization (see below). `check` asks the usage endpoint whether the token can read quota, and with `--model` sends one request through `claude -p`. `print` writes the token to standard output, only when that is not a terminal (see below). |
 | `cs remove <alias>` | Delete a saved account, its token and its pane directory. |
 | `cs rotate [options]` | One rotation run, meant for a timer (see Rotation). |
 | `cs help` | Usage. |
@@ -202,6 +204,33 @@ pipe behind `$(...)`. On a terminal it refuses (message on stderr, exit 1), so a
 `cs token print work` cannot leave a token in your scrollback. If the token cannot be
 read, the line says so on stderr and leaves `CLAUDE_CODE_OAUTH_TOKEN` unset, rather
 than leaving an empty or an old value. `jq` is not used anywhere in the program.
+
+### Setting a one-year token
+
+`claude setup-token` makes a token for the account that is logged in when you run it.
+Run it while another account is logged in, and `cs token set work` would file that
+other account's token under `work`, and every probe of `work` would show the other
+account's usage. So when `work` has a saved login with an `organizationUuid`, `cs token
+set work` first sends one one-token request (the probe request) with the new token and
+compares the `anthropic-organization-id` header of the reply, in lower case, with that
+`organizationUuid`. The request can take up to 30 seconds (the probe timeout) before it
+answers or gives up. On a mismatch it names both ids, stores nothing, leaves any token
+already stored as it was, and exits 75, like the other refusals that `--force` lifts.
+There are two usual causes, and the message names both: the token was made while another
+account was logged in, or the account's organization changed since `cs save` (for example
+it moved to a team plan), in which case log in to it and run `cs save work` again.
+`cs token set --force work` stores the token anyway and says so; the token is read from
+stdin again, as for any `cs token set`.
+
+When the two cannot be compared, the token is stored as before and one `note:` line on
+stderr says the organization was not checked. That happens when the saved login names no
+organization, or one that is not a UUID (no request is made then), when the API does not
+answer, when its reply carries no organization id, two different ones or one that is not
+a UUID, and when the API answers 401, 403 or another error status without one. A 401
+note says to check that the whole token was pasted. A 403 whose organization is the saved
+one is stored with a note that the account is refused now. Accounts that share one
+organization, such as the members of a team plan, cannot be told apart this way: a token
+from any of them passes.
 
 ## Ceilings
 
@@ -473,7 +502,7 @@ status) is "unknown", never "out".
 | `STALE_DAYS` | Age after which a saved login without a one-year token shows as `STALE` (default 7). |
 | `WATCH_INTERVAL` | Seconds between checks in `cs watch` (default 10; 30 on macOS with a Keychain-only login, where each check runs `security`). |
 | `SHARKSWAP_PROBE_MODEL` | Model for the probe request. |
-| `SHARKSWAP_API_BASE` | Send probes to a different API address. Only loopback addresses (`http://127.0.0.1:PORT`, `localhost`, `[::1]`) are accepted, for testing against a stub. |
+| `SHARKSWAP_API_BASE` | Send probes, and the request of `cs token set`, to a different API address. Only loopback addresses (`http://127.0.0.1:PORT`, `localhost`, `[::1]`) are accepted, for testing against a stub. |
 | `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | Where the rotation pool, log and state go. |
 
 ## Performance
@@ -576,7 +605,8 @@ any other keychain. The hooks are for tests, not settings; do not set them.
 - A saved login can go stale. OAuth refresh tokens rotate, so a snapshot of an account
   you keep using elsewhere may stop working. Re-save it, run `cs watch`, or use a
   one-year token.
-- The probe spends one token of the account's allowance per request.
+- The probe spends one token of the account's allowance per request. So does the
+  organization check of `cs token set`.
 - The switch is global to the machine: it changes the login every new `claude` session
   uses. Use `cs pane` for per-terminal accounts.
 - An interrupted switch is detected, not repaired: see "An interrupted switch" for what

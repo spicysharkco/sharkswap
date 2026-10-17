@@ -136,6 +136,8 @@ pub struct Reply {
     /// Window name as sent to `{util, resets, status}`, each field present only
     /// when it validated.
     pub limits: Map<String, Value>,
+    /// The organization the API placed the credential in (see `parse_org`).
+    pub org: Option<String>,
 }
 
 impl Reply {
@@ -143,6 +145,7 @@ impl Reply {
         Reply {
             http: 0,
             limits: Map::new(),
+            org: None,
         }
     }
 }
@@ -181,15 +184,54 @@ pub fn ask(tok: &str) -> Reply {
     if !(100..=599).contains(&code) {
         return Reply::none();
     }
-    let headers = resp.headers().iter().map(|(k, v)| {
-        (
-            k.as_str(),
-            String::from_utf8_lossy(v.as_bytes()).into_owned(),
-        )
-    });
+    let headers = || {
+        resp.headers().iter().map(|(k, v)| {
+            (
+                k.as_str(),
+                String::from_utf8_lossy(v.as_bytes()).into_owned(),
+            )
+        })
+    };
     Reply {
         http: code,
-        limits: parse_limits(headers),
+        limits: parse_limits(headers()),
+        org: parse_org(headers()),
+    }
+}
+
+/// An organization id as the API sends it (`anthropic-organization-id`) and as a
+/// saved login stores it (`organizationUuid`): a UUID, compared in lower case.
+/// Anything else is not an organization and is never compared.
+pub fn org_id(s: &str) -> Option<String> {
+    let s = s.trim_matches([' ', '\t']).to_ascii_lowercase();
+    let groups: Vec<&str> = s.split('-').collect();
+    let ok = groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(g, n)| g.len() == n && g.bytes().all(|b| b.is_ascii_hexdigit()));
+    ok.then_some(s)
+}
+
+/// The organization a reply's headers name. The API sends
+/// `anthropic-organization-id` on a 200 reply and may leave it out on an error
+/// status; `token set` compares it whenever it is there, whatever the status.
+/// The value counts only when the headers hold exactly one distinct value
+/// and it is a UUID: two different values cannot say which organization
+/// answered, and a malformed one must not read as a different organization.
+pub fn parse_org<'a>(headers: impl Iterator<Item = (&'a str, String)>) -> Option<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("anthropic-organization-id") {
+            let v = value.trim_matches([' ', '\t']).to_ascii_lowercase();
+            if !seen.contains(&v) {
+                seen.push(v);
+            }
+        }
+    }
+    match seen.as_slice() {
+        [one] => org_id(one),
+        _ => None,
     }
 }
 

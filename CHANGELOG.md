@@ -7,6 +7,19 @@ version (0.x.0) may change commands, output or file formats.
 
 ## [Unreleased]
 
+### Changed
+
+- `cs token set <alias>` compares the organization the API places the new token in (the
+  `anthropic-organization-id` header of one one-token request, which can take up to 30
+  seconds) with the `organizationUuid` of the alias's saved login. A token from another
+  organization, such as one made while another account was logged in, is refused with
+  exit 75, both ids named, the other possible cause (the account's organization changed
+  since `cs save`) named and nothing stored; `cs token set --force <alias>` stores it
+  anyway. When the two cannot be compared, the token is stored as before with a note: the
+  saved login names no organization id or one that is not a UUID, the API did not answer,
+  or its reply has no valid organization id (a 401, a 403 or another error status say so
+  in their own note). Accounts that share one organization cannot be told apart this way.
+
 ### Fixed
 
 - `cs rotate` no longer overwrites a login you switched to by hand while it was

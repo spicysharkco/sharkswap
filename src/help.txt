@@ -57,6 +57,9 @@ Usage:
   sharkswap token set|rm|list|check|print <alias> …
                                one-year tokens from `claude setup-token`: no monthly
                                /login, no refresh race; `pane` prefers one.
+                               `set` refuses a token the API places in another
+                               organization than the alias's saved login with exit 75,
+                               unless --force
                                `print` writes the token to a pipe or $(...), never to a
                                terminal; `check --model` sends one request through claude
   sharkswap remove <alias>     delete stored account, its one-year token and its pane home

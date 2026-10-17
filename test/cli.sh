@@ -861,6 +861,133 @@ s_token() {
   assert_out_has "list says there are none" "no one-year tokens"
 }
 
+s_token_org() {
+  section "one-year token organization"
+  new_world tokenorg
+  save_as work alice@example.com 1
+  local org_a=11111111-1111-4111-8111-111111111111 org_b=22222222-2222-4222-8222-222222222222
+  local tok other store="$H/.sharkswap" before
+  tok="$(setup_token)"
+  other="${tok}k"
+  printf '%s\n' "$tok" > "$W/tok.txt"
+  printf '%s\n' "$other" > "$W/other.txt"
+  jq --arg o "$org_a" '.organizationUuid = $o' "$store/work.json" > "$W/meta.tmp"
+  mv "$W/meta.tmp" "$store/work.json"; chmod 600 "$store/work.json"
+  posts() { grep -c '^POST /v1/messages work-token' "$STUB_LOG" || true; }
+  stub_start
+
+  # Guards: a token made while another account was logged in was filed under the
+  # alias with no check, and probes then showed that account's usage there.
+  stub_route_raw "$tok" work-token 200 "$(jq -n --arg o "$org_b" '{"anthropic-organization-id": $o}')" 0
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "a token from another organization is refused" 75
+  assert_err_has "the refusal names the token's organization" "organization $org_b"
+  assert_err_has "and the one the alias was saved with" "organization $org_a"
+  assert_err_has "and says nothing was stored" "nothing stored"
+  # Guard: an account that moved to another plan was told it had pasted the
+  # wrong account's token, with no hint that its own organization had changed.
+  assert_err_has "and names the other cause" "the organization of 'work' changed since 'sharkswap save'"
+  assert_err_has "with how to fix it" "run 'sharkswap save work' again"
+  assert_err_has "and says the token is read from stdin again" "sharkswap token set --force work   (the token is read from stdin again"
+  assert_no_file "no token file is written" "$store/tokens/work.json"
+  assert_eq "one request asked the API" "1" "$(posts)"
+  assert_out_lacks "the refusal never prints the token" "$tok"
+
+  # Guard: a refused token must leave the token already stored as it was.
+  stub_route_raw "$tok" work-token 200 "$(jq -n --arg o "$org_a" '{"anthropic-organization-id": $o}')" 0
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "a token from the saved organization is stored" 0
+  assert_eq "no note when the organizations match" "" "$ERR"
+  assert_eq "the token file holds it" "$tok" "$(jq -r .token "$store/tokens/work.json")"
+  stub_route_raw "$other" work-other 200 "$(jq -n --arg o "$org_b" '{"anthropic-organization-id": $o}')" 0
+  CS_STDIN="$W/other.txt" cs token set work
+  assert_rc "a second token from another organization is refused" 75
+  assert_eq "the stored token is untouched" "$tok" "$(jq -r .token "$store/tokens/work.json")"
+
+  # Guard: --force is the way past the refusal, and says so.
+  CS_STDIN="$W/other.txt" cs token set --force work
+  assert_rc "--force stores a token from another organization" 0
+  assert_err_has "and says it overrode the check" "override: --force stored the token for 'work'"
+  assert_eq "the token file holds the forced token" "$other" "$(jq -r .token "$store/tokens/work.json")"
+
+  # Guard: the same id spelled in capitals is the same organization.
+  stub_route_raw "$tok" work-token 200 "$(jq -n --arg o "${org_a^^}" '{"anthropic-organization-id": $o}')" 0
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "an upper-case organization id matches" 0
+  assert_eq "and the token is stored" "$tok" "$(jq -r .token "$store/tokens/work.json")"
+
+  # Guard: a reply that cannot say which organization answered must not block a
+  # token that may well be right; it is stored with a note.
+  rm -f "$store/tokens/work.json"
+  stub_route_raw "$tok" work-token 200 '{}' 0
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "a reply without an organization id stores the token" 0
+  assert_err_has "and says it was not checked" "note: the organization of this token was not checked: the API answered 200 without an organization id"
+  assert_eq "the token file holds it" "$tok" "$(jq -r .token "$store/tokens/work.json")"
+  rm -f "$store/tokens/work.json"
+  stub_route_raw "$tok" work-token 200 '{"anthropic-organization-id": "not-an-id"}' 0
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "a malformed organization id is no organization, and the token is stored" 0
+  assert_err_has "with the same note" "the API answered 200 without an organization id"
+  rm -f "$store/tokens/work.json"
+  stub_route_raw "$tok" work-token 200 "$(jq -n --arg a "$org_a" --arg b "$org_b" '{"anthropic-organization-id": [$a, $b]}')" 0
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "two different organization ids name none, and the token is stored" 0
+  assert_err_has "with the same note" "the API answered 200 without an organization id"
+
+  # Guard: every reply without an organization id said "the API sent no
+  # organization id", so a refused token read as an API that had forgotten a
+  # header, and a 403 from the saved organization returned without a word.
+  rm -f "$store/tokens/work.json"
+  stub_route_raw "$tok" work-token 401 '{}' 0
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "a 401 still stores the token" 0
+  assert_err_has "and says the API refused it" "note: the API refused this token with 401; its organization was not checked and the token is stored anyway. Check that the whole token was pasted."
+  assert_eq "the token file holds it" "$tok" "$(jq -r .token "$store/tokens/work.json")"
+  rm -f "$store/tokens/work.json"
+  stub_route_raw "$tok" work-token 403 '{}' 0
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "a 403 without an organization id still stores the token" 0
+  assert_err_has "and says it was not checked" "note: the API refused this token with 403; its organization was not checked."
+  rm -f "$store/tokens/work.json"
+  stub_route_raw "$tok" work-token 403 "$(jq -n --arg o "$org_a" '{"anthropic-organization-id": $o}')" 0
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "a 403 from the saved organization still stores the token" 0
+  assert_err_has "and says the account is refused now" "note: the API answered 403; the token is in the saved organization, but the account is refused now."
+  rm -f "$store/tokens/work.json"
+  stub_route_raw "$tok" work-token 500 '{}' 0
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "a 500 without an organization id still stores the token" 0
+  assert_err_has "and gives its status" "note: the organization of this token was not checked: the API answered 500 without an organization id"
+
+  # Guard: scripts without a network keep working. No saved organization asks
+  # nothing; an API that does not answer is a note, not a failure.
+  rm -f "$store/tokens/work.json"
+  before="$(posts)"
+  jq 'del(.organizationUuid)' "$store/work.json" > "$W/meta.tmp"
+  mv "$W/meta.tmp" "$store/work.json"; chmod 600 "$store/work.json"
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "a login with no saved organization stores the token" 0
+  assert_err_has "and says why it was not checked" "names no organization"
+  assert_eq "and asks the API nothing" "$before" "$(posts)"
+  rm -f "$store/tokens/work.json"
+  # Guard: a saved id that is not a UUID read as "names no organization".
+  jq '.organizationUuid = "not-an-id"' "$store/work.json" > "$W/meta.tmp"
+  mv "$W/meta.tmp" "$store/work.json"; chmod 600 "$store/work.json"
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "a login with a malformed saved organization stores the token" 0
+  assert_err_has "and says the id is not valid" "the login saved as 'work' names no valid organization id"
+  assert_eq "and asks the API nothing" "$before" "$(posts)"
+  rm -f "$store/tokens/work.json"
+  jq --arg o "$org_a" '.organizationUuid = $o' "$store/work.json" > "$W/meta.tmp"
+  mv "$W/meta.tmp" "$store/work.json"; chmod 600 "$store/work.json"
+  stub_stop
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_rc "an API that does not answer still stores the token" 0
+  assert_err_has "and says so" "the API did not answer"
+  assert_eq "the token file holds it" "$tok" "$(jq -r .token "$store/tokens/work.json")"
+}
+
 s_probe() {
   section "probe"
   new_world probe
@@ -1709,7 +1836,7 @@ s_fifo_store() {
   stub_stop
 }
 
-for scenario in s_save_and_list s_switch s_keychain_path s_switch_intent s_switch_intent_rotate s_switch_live s_pane s_token s_probe s_gate s_best_and_bar s_rotate s_rotate_notes s_rotate_moved s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
+for scenario in s_save_and_list s_switch s_keychain_path s_switch_intent s_switch_intent_rotate s_switch_live s_pane s_token s_token_org s_probe s_gate s_best_and_bar s_rotate s_rotate_notes s_rotate_moved s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
   "$scenario"
 done
 summary
