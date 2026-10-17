@@ -1417,13 +1417,56 @@ s_help_and_dispatch() {
   assert_out_has "help names the copies a failed switch keeps" "*.backup.*"
   assert_out_has "all of them" "*.switch-backup.*"
   assert_out_has "and the Keychain one" "keychain-prior-login.*"
+  assert_out_has "help lists --version" "sharkswap --version"
+
+  # --version and -V print the package version on one line, and extra arguments
+  # change nothing (they are ignored, as they are after help).
+  local version
+  version="$(sed -n '/^\[package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p;}' "$ROOT/Cargo.toml")"
+  [[ -n "$version" ]] || fail "Cargo.toml has a version"
+  cs --version
+  assert_rc "--version" 0
+  assert_eq "--version prints the name and the version" "sharkswap $version" "$OUT"
+  printf 'sharkswap %s\n' "$version" > "$W/want-version"
+  if cmp -s "$W/want-version" "$W/out.txt"; then
+    pass "--version prints exactly one line"
+  else
+    fail "--version prints exactly one line" "got: $(od -c "$W/out.txt" | head -n 3)"
+  fi
+  assert_eq "--version prints nothing on stderr" "" "$ERR"
+  cs -V
+  assert_rc "-V" 0
+  assert_eq "-V prints the same" "sharkswap $version" "$OUT"
+  cs --version extra --words
+  assert_rc "--version with extra arguments" 0
+  assert_eq "extra arguments after --version are ignored" "sharkswap $version" "$OUT"
+  cs help extra --words
+  assert_eq "extra arguments after help are ignored" "$help_out" "$OUT"
+
+  # help and the version run without a store: in an empty HOME nothing is made
+  # (not ~/.sharkswap, not ~/.claude), and a HOME that does not exist stays so.
+  local real_h="$H" word
+  H="$W/empty-home"
+  mkdir "$H"
+  for word in help -h --help --version -V; do
+    cs "$word"
+    assert_rc "$word in an empty HOME" 0
+    assert_eq "$word leaves an empty HOME empty" "" "$(ls -A "$H")"
+  done
+  rmdir "$H"
+  for word in help -h --help --version -V; do
+    cs "$word"
+    assert_rc "$word with no HOME directory" 0
+    assert_no_file "$word does not make the HOME directory" "$H"
+  done
+  H="$real_h"
 
   # Every word the dispatch answers as a command is refused as an account name
   # (the Rust test dispatch_table_matches_the_reserved_words keeps the table and
   # the list in step; this checks the refusal end to end).
   save_as work alice@example.com 1
-  local word bad=""
-  for word in next toggle status st list ls pane save watch best bar token probe rotate remove rm help -h --help; do
+  local bad=""
+  for word in next toggle status st list ls pane save watch best bar token probe rotate remove rm help -h --help --version -V; do
     cs save "$word"
     if [[ "$RC" != 1 || "$ERR" != *"invalid or reserved alias"* ]]; then bad="$bad $word"; fi
   done

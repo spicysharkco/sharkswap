@@ -875,8 +875,27 @@ pub fn restore_path(dst: &Path, backup: &Path, had: bool) -> bool {
 
 /// Every word the dispatch answers as a command (keep in step with main.rs).
 pub const COMMAND_WORDS: &[&str] = &[
-    "next", "toggle", "status", "st", "list", "ls", "pane", "save", "watch", "best", "bar",
-    "token", "probe", "rotate", "remove", "rm", "help", "-h", "--help",
+    "next",
+    "toggle",
+    "status",
+    "st",
+    "list",
+    "ls",
+    "pane",
+    "save",
+    "watch",
+    "best",
+    "bar",
+    "token",
+    "probe",
+    "rotate",
+    "remove",
+    "rm",
+    "help",
+    "-h",
+    "--help",
+    "--version",
+    "-V",
 ];
 
 /// `check_alias` without the message: safe characters, no reserved name, and
@@ -2084,5 +2103,18 @@ mod tests {
         ctx.creds_write(&over)
             .unwrap_or_else(|_| panic!("the argv form stores the 4095-byte line"));
         assert_eq!(ctx.creds_read(), over, "read back the 4095-byte line");
+    }
+
+    #[test]
+    fn help_and_version_words_are_not_aliases() {
+        for word in ["help", "-h", "--help", "--version", "-V"] {
+            assert!(
+                !alias_ok(word, false),
+                "{word} must not be saved as an alias"
+            );
+            assert!(alias_ok(word, true), "{word} must stay removable");
+        }
+        assert!(alias_ok("version", false));
+        assert!(alias_ok("V", false));
     }
 }

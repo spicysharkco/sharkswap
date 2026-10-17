@@ -64,3 +64,4 @@ Usage:
                                run from a timer: move this login to another account once
                                the current one is refused or at its ceiling
                                (README: Rotation)
+  sharkswap --version          print the version (also -V)

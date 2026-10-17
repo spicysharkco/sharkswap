@@ -182,8 +182,9 @@ claude
 | `cs remove <alias>` | Delete a saved account, its token and its pane directory. |
 | `cs rotate [options]` | One rotation run, meant for a timer (see Rotation). |
 | `cs help` | Usage. |
+| `cs --version` | Print the version on one line, `sharkswap X.Y.Z`. `-V` does the same. Like `cs help`, it reads no login and makes no files. |
 
-The command words above are reserved, so they cannot be used as aliases.
+The command words above, and `-h`, `--help`, `--version` and `-V`, are reserved, so they cannot be used as aliases.
 
 `best --raw` columns: alias, weekly %, weekly reset (ISO time), age in days, state,
 5-hour %. States: `fresh`, `PROBE-OK`, `PROBE-?`, `PROBE-ERR`, `BLOCKED`, `SPENT`,

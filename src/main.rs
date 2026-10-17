@@ -19,15 +19,22 @@ type Res = Result<(), i32>;
 type Handler = fn(&Ctx, &[String]) -> Res;
 
 const HELP: &str = include_str!("help.txt");
+const VERSION: &str = concat!("sharkswap ", env!("CARGO_PKG_VERSION"), "\n");
 
-fn help(_: &Ctx, _: &[String]) -> Res {
-    print!("{HELP}");
-    Ok(())
-}
+/// The words that print a fixed text and nothing else. They run before `Ctx::new`
+/// (which makes `~/.sharkswap`), so they create, read and touch nothing, and any
+/// arguments after them are ignored.
+const TEXTS: &[(&str, &str)] = &[
+    ("help", HELP),
+    ("-h", HELP),
+    ("--help", HELP),
+    ("--version", VERSION),
+    ("-V", VERSION),
+];
 
-/// Every word that is a command and never an account alias. `store::COMMAND_WORDS`
-/// lists the same words (an alias spelled like one could not be switched to); a
-/// test keeps the two in step.
+/// Every other word that is a command and never an account alias. With `TEXTS`,
+/// `store::COMMAND_WORDS` lists the same words (an alias spelled like one could
+/// not be switched to); a test keeps them in step.
 const COMMANDS: &[(&str, Handler)] = &[
     ("next", |c, _| cmds::cmd_toggle(c)),
     ("toggle", |c, _| cmds::cmd_toggle(c)),
@@ -45,13 +52,14 @@ const COMMANDS: &[(&str, Handler)] = &[
     ("rotate", rotate::cmd_rotate),
     ("remove", cmds::cmd_remove),
     ("rm", cmds::cmd_remove),
-    ("help", help),
-    ("-h", help),
-    ("--help", help),
 ];
 
 fn run(args: &[String]) -> Res {
     let word = args.first().map_or("", String::as_str);
+    if let Some((_, text)) = TEXTS.iter().find(|(name, _)| *name == word) {
+        print!("{text}");
+        return Ok(());
+    }
     // A status line and a background watcher keep their output clean.
     let ctx = Ctx::new(!matches!(word, "bar" | "watch"))?;
     if word.is_empty() {
@@ -88,15 +96,42 @@ mod tests {
 
     #[test]
     fn dispatch_table_matches_the_reserved_words() {
-        let table: BTreeSet<&str> = COMMANDS.iter().map(|(n, _)| *n).collect();
+        let table: BTreeSet<&str> = COMMANDS
+            .iter()
+            .map(|(n, _)| *n)
+            .chain(TEXTS.iter().map(|(n, _)| *n))
+            .collect();
         let reserved: BTreeSet<&str> = store::COMMAND_WORDS.iter().copied().collect();
         assert_eq!(table, reserved);
-        assert_eq!(COMMANDS.len(), table.len(), "a command is listed twice");
+        assert_eq!(
+            COMMANDS.len() + TEXTS.len(),
+            table.len(),
+            "a command is listed twice"
+        );
+    }
+
+    #[test]
+    fn version_is_one_line_with_the_package_version() {
+        let number = VERSION.strip_prefix("sharkswap ").expect("name first");
+        let number = number.strip_suffix('\n').expect("one newline at the end");
+        assert_eq!(number, env!("CARGO_PKG_VERSION"));
+        assert!(!number.is_empty() && !number.contains(char::is_whitespace));
+    }
+
+    #[test]
+    fn text_words_print_help_or_the_version() {
+        for word in ["help", "-h", "--help"] {
+            assert_eq!(TEXTS.iter().find(|(n, _)| *n == word).unwrap().1, HELP);
+        }
+        for word in ["--version", "-V"] {
+            assert_eq!(TEXTS.iter().find(|(n, _)| *n == word).unwrap().1, VERSION);
+        }
     }
 
     #[test]
     fn help_is_the_usage_block() {
         assert!(HELP.starts_with("sharkswap: a Claude Code account switcher.\n"));
-        assert!(HELP.trim_end().ends_with("(README: Rotation)"));
+        assert!(HELP.contains("(README: Rotation)"));
+        assert!(HELP.trim_end().ends_with("print the version (also -V)"));
     }
 }
