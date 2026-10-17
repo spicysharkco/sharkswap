@@ -1369,16 +1369,20 @@ fn check_token_org(ctx: &Ctx, alias: &str, token: &str, force: bool) -> Res {
         return Ok(());
     };
     let reply = probe::ask(token);
+    let said = reply
+        .message
+        .as_deref()
+        .map_or(String::new(), |m| format!(": {m}"));
     let Some(got) = reply.org else {
         match reply.http {
             0 => eprintln!(
                 "note: the organization of this token was not checked: the API did not answer"
             ),
             401 => eprintln!(
-                "note: the API refused this token with 401; its organization was not checked and the token is stored anyway. Check that the whole token was pasted."
+                "note: the API refused this token with 401{said}; its organization was not checked and the token is stored anyway. Check that the whole token was pasted."
             ),
             403 => eprintln!(
-                "note: the API refused this token with 403; its organization was not checked."
+                "note: the API refused this token with 403{said}; its organization was not checked."
             ),
             http => eprintln!(
                 "note: the organization of this token was not checked: the API answered {http} without an organization id"
@@ -1389,7 +1393,7 @@ fn check_token_org(ctx: &Ctx, alias: &str, token: &str, force: bool) -> Res {
     if got == want {
         if reply.http == 403 {
             eprintln!(
-                "note: the API answered 403; the token is in the saved organization, but the account is refused now."
+                "note: the API answered 403{said}; the token is in the saved organization, but the account is refused now."
             );
         }
         return Ok(());

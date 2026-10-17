@@ -25,6 +25,13 @@ use std::time::Duration;
 const DEFAULT_BASE: &str = "https://api.anthropic.com";
 const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
 
+/// The most of an error body that is read to find its message.
+const ERROR_BODY_MAX: u64 = 8 * 1024;
+
+/// The 403 message that, in practice, means the account's subscription is not
+/// active: paying again restores the same login.
+const ORG_REFUSED: &str = "OAuth authentication is currently not allowed for this organization.";
+
 /// The API root: the fixed endpoint, or a loopback server named for a test.
 pub fn api_base() -> String {
     let raw = env_or_empty("SHARKSWAP_API_BASE");
@@ -138,6 +145,8 @@ pub struct Reply {
     pub limits: Map<String, Value>,
     /// The organization the API placed the credential in (see `parse_org`).
     pub org: Option<String>,
+    /// The `error.message` of a 401 or 403 body, as one short printable line.
+    pub message: Option<String>,
 }
 
 impl Reply {
@@ -146,6 +155,7 @@ impl Reply {
             http: 0,
             limits: Map::new(),
             org: None,
+            message: None,
         }
     }
 }
@@ -165,7 +175,8 @@ fn agent(base: &str, secs: u64) -> ureq::Agent {
 }
 
 /// The one-token question, asked with `tok`. A transfer that failed is not a
-/// reading: it gives status 0 and no windows.
+/// reading: it gives status 0 and no windows. The body is read only for a 401 or
+/// 403, and only up to `ERROR_BODY_MAX`.
 pub fn ask(tok: &str) -> Reply {
     let base = api_base();
     let body = format!(
@@ -179,7 +190,9 @@ pub fn ask(tok: &str) -> Reply {
         .header("anthropic-beta", "oauth-2025-04-20")
         .header("content-type", "application/json")
         .send(body.as_str());
-    let Ok(resp) = resp else { return Reply::none() };
+    let Ok(mut resp) = resp else {
+        return Reply::none();
+    };
     let code = resp.status().as_u16();
     if !(100..=599).contains(&code) {
         return Reply::none();
@@ -192,11 +205,55 @@ pub fn ask(tok: &str) -> Reply {
             )
         })
     };
+    let (limits, org) = (parse_limits(headers()), parse_org(headers()));
+    let message = if matches!(code, 401 | 403) {
+        error_message(resp.body_mut(), tok)
+    } else {
+        None
+    };
     Reply {
         http: code,
-        limits: parse_limits(headers()),
-        org: parse_org(headers()),
+        limits,
+        org,
+        message,
     }
+}
+
+/// The `error.message` of an API error body, as `shown_line` shows it. A body
+/// over `ERROR_BODY_MAX`, one that is not JSON, one without a message and one
+/// whose message echoes the token give none.
+fn error_message(body: &mut ureq::Body, tok: &str) -> Option<String> {
+    let text = body
+        .with_config()
+        .limit(ERROR_BODY_MAX)
+        .read_to_string()
+        .ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let msg = v.get("error")?.get("message")?.as_str()?;
+    let line = shown_line(msg);
+    // An echo of the token must not be printed, even in part. So the message is
+    // searched as sent, as it prints once control and non-ASCII characters are
+    // dropped (a token with one inside it reads whole again) and as shown (cut at
+    // 120 characters), each for the whole token and for any 24 consecutive
+    // characters of it, which include its secret part.
+    let plain: String = msg.chars().filter(|c| matches!(c, ' '..='~')).collect();
+    if [msg, plain.as_str(), line.as_str()]
+        .iter()
+        .any(|t| echoes(t, tok))
+    {
+        return None;
+    }
+    (!line.is_empty()).then_some(line)
+}
+
+/// Whether `text` holds `tok`, or any 24 consecutive characters of it.
+fn echoes(text: &str, tok: &str) -> bool {
+    const PART: usize = 24;
+    let chars: Vec<char> = tok.chars().collect();
+    text.contains(tok)
+        || chars
+            .windows(PART)
+            .any(|w| text.contains(&w.iter().collect::<String>()))
 }
 
 /// An organization id as the API sends it (`anthropic-organization-id`) and as a
@@ -491,6 +548,8 @@ pub struct Obs {
 pub struct Outcome {
     pub obs: Obs,
     pub row: [String; 4],
+    /// What the API said when it refused the credential, if it said.
+    pub message: Option<String>,
 }
 
 /// Ask for one alias and reduce the reply to an observation and a display row.
@@ -507,7 +566,11 @@ pub fn probe_one(alias: &str, cred: &Cred, now: i64) -> Outcome {
         cred: cred.kind,
         limits: reply.limits,
     };
-    Outcome { obs, row }
+    Outcome {
+        obs,
+        row,
+        message: reply.message,
+    }
 }
 
 // ---- the availability record ---------------------------------------------------
@@ -737,6 +800,19 @@ pub fn cmd_probe(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
                 "{a:<wa$}  {:<ws$}  {:<w5$}  {:<ww$}  {}",
                 r[0], r[1], r[2], r[3]
             ),
+        }
+    }
+    // The table cell says only AUTH 401 or 403; the API's own words go below it.
+    for o in &outcomes {
+        let Some(msg) = &o.message else { continue };
+        eprintln!(
+            "sharkswap probe: {}: refused with {}: {msg}",
+            o.obs.alias, o.obs.http
+        );
+        if o.obs.http == 403 && msg == ORG_REFUSED {
+            eprintln!(
+                "  The organization does not allow this login now; check the account's subscription or billing."
+            );
         }
     }
     if jobs.is_empty() {

@@ -959,6 +959,15 @@ s_token_org() {
   CS_STDIN="$W/tok.txt" cs token set work
   assert_rc "a 500 without an organization id still stores the token" 0
   assert_err_has "and gives its status" "note: the organization of this token was not checked: the API answered 500 without an organization id"
+  # Guard: the notes carry the API's own words when it gave any.
+  rm -f "$store/tokens/work.json"
+  stub_route_raw "$tok" work-token 401 '{}' 0 "" '{"error": {"message": "invalid bearer token"}}'
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_err_has "a 401 note carries the message" "note: the API refused this token with 401: invalid bearer token; its organization was not checked"
+  rm -f "$store/tokens/work.json"
+  stub_route_raw "$tok" work-token 403 "$(jq -n --arg o "$org_a" '{"anthropic-organization-id": $o}')" 0 "" '{"error": {"message": "Request not allowed"}}'
+  CS_STDIN="$W/tok.txt" cs token set work
+  assert_err_has "so does a 403 from the saved organization" "note: the API answered 403: Request not allowed; the token is in the saved organization"
 
   # Guard: scripts without a network keep working. No saved organization asks
   # nothing; an API that does not answer is a note, not a failure.
@@ -1047,6 +1056,83 @@ s_probe() {
   cs probe work
   assert_out_has "a dead endpoint is reported as no reply" "no reply"
   assert_eq "no reply never marks an account out" "unknown" "$(jq -r .work.state "$av")"
+}
+
+s_probe_refusal() {
+  section "probe: why a login was refused"
+  new_world refusal
+  save_as lapsed alice@example.com 1
+  save_as badkey bob@example.com 2
+  save_as other carol@example.com 3
+  save_as long dave@example.com 4
+  save_as bare erin@example.com 5
+  save_as leaks frank@example.com 6
+  save_as ctrl grace@example.com 7
+  save_as huge heidi@example.com 8
+  save_as partial ivan@example.com 9
+  local av="$H/.sharkswap/availability.json" flood tok
+  local org_msg='OAuth authentication is currently not allowed for this organization.'
+  err_body() { jq -n --arg m "$1" '{type: "error", error: {type: "permission_error", message: $m}}'; }
+  tok="$(setup_token)"
+  printf '%s\n' "$tok" > "$W/tok.txt"
+  CS_STDIN="$W/tok.txt" cs token set partial
+  stub_start
+  stub_route 1 lapsed 403 '{}' 0 "$(err_body "$org_msg")"
+  stub_route 2 badkey 401 '{}' 0 "$(err_body 'invalid bearer token')"
+  stub_route 3 other 403 '{}' 0 "$(err_body 'Request not allowed')"
+  flood="$(printf '%0300d' 0 | tr 0 x)"
+  # The control characters come before character 120, so they show in the line
+  # unless the printable filter ran.
+  stub_route 4 long 403 '{}' 0 "$(err_body "${flood:0:60}"$'\033[31mred\a'"${flood:60}")"
+  stub_route 5 bare 403 '{}' 0 '{}'
+  stub_route 6 leaks 403 '{}' 0 "$(err_body "invalid bearer $(fake_token 6)")"
+  stub_route 7 ctrl 403 '{}' 0 "$(err_body "invalid bearer fake-ac"$'\033'"cess-7")"
+  stub_route 8 huge 403 '{}' 0 "$(err_body "$(printf '%09000d' 0 | tr 0 y)")"
+  stub_route_raw "$tok" partial 403 '{}' 0 "" "$(err_body "denied ${tok:20:30} here")"
+
+  cs probe
+  assert_rc "probe with refused accounts" 0
+  # Guard: the table said only AUTH 403 and gave no reason, so a lapsed
+  # subscription read as a broken login.
+  assert_eq "the table cell stays short" "1" "$(grep -cE '^lapsed +AUTH 403 ' <<<"$OUT" || true)"
+  assert_err_has "the API's own message is printed" "sharkswap probe: lapsed: refused with 403: $org_msg"
+  assert_err_has "with a hint for that message" "The organization does not allow this login now; check the account's subscription or billing."
+  assert_err_has "a 401 has its message too" "sharkswap probe: badkey: refused with 401: invalid bearer token"
+  assert_eq "the hint is for that one message only" "1" "$(grep -c 'does not allow this login now' <<<"$ERR" || true)"
+  assert_err_has "another 403 message is printed as it is" "sharkswap probe: other: refused with 403: Request not allowed"
+  assert_eq "an empty error body adds no line" "0" "$(grep -c 'probe: bare:' <<<"$ERR" || true)"
+  assert_eq "its table cell is the same" "1" "$(grep -cE '^bare +AUTH 403 ' <<<"$OUT" || true)"
+  # Guard: a message with control characters was printed as sent, so an error
+  # body could move the cursor or recolour the terminal.
+  assert_eq "a long message is cut and printable" \
+    "sharkswap probe: long: refused with 403: ${flood:0:60}[31mred${flood:0:53}..." \
+    "$(grep '^sharkswap probe: long:' <<<"$ERR")"
+
+  # Guard: an error body that repeats the bearer token would have put the token
+  # in the terminal and in whatever logs it.
+  assert_eq "a message that holds the token adds no line" "0" "$(grep -c 'probe: leaks:' <<<"$ERR" || true)"
+  assert_out_lacks "and the token is not in the output" "$(fake_token 6)"
+  # Guard: the token was looked for in the message as sent, so a control
+  # character inside the echoed token hid it, and the filter then made it whole.
+  assert_eq "a token with a control character inside it adds no line" "0" "$(grep -c 'probe: ctrl:' <<<"$ERR" || true)"
+  assert_out_lacks "and that token is not in the output" "$(fake_token 7)"
+  # Guard: a part of the token is enough to rebuild it with the rest of the
+  # output, so a message holding 24 or more of its characters is dropped too.
+  assert_eq "a message that holds part of the token adds no line" "0" "$(grep -c 'probe: partial:' <<<"$ERR" || true)"
+  assert_out_lacks "and that part is not in the output" "${tok:20:30}"
+  # Guard: the body is read to find the message; an unbounded one would let a
+  # reply fill memory.
+  assert_eq "a body over 8 KiB adds no line" "0" "$(grep -c 'probe: huge:' <<<"$ERR" || true)"
+  assert_out_lacks "no token in the output" "fake-access"
+  assert_eq "nothing but the table is on stdout" "10" "$(wc -l <<<"$OUT" | tr -d ' ')"
+
+  # Guard: the message was only for the person at the terminal; it must not reach
+  # the record that best and bar read, or their output changes.
+  assert_eq "the record keeps its keys" "cred,http,reason,state,via" \
+    "$(jq -r '.lapsed | keys - ["at"] | join(",")' "$av")"
+  assert_eq "a 403 is still unknown" "unknown" "$(jq -r .lapsed.state "$av")"
+  assert_eq "nothing of the message is recorded" "0" "$(grep -c 'organization' "$av" || true)"
+  stub_stop
 }
 
 s_gate() {
@@ -1836,7 +1922,7 @@ s_fifo_store() {
   stub_stop
 }
 
-for scenario in s_save_and_list s_switch s_keychain_path s_switch_intent s_switch_intent_rotate s_switch_live s_pane s_token s_token_org s_probe s_gate s_best_and_bar s_rotate s_rotate_notes s_rotate_moved s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
+for scenario in s_save_and_list s_switch s_keychain_path s_switch_intent s_switch_intent_rotate s_switch_live s_pane s_token s_token_org s_probe s_probe_refusal s_gate s_best_and_bar s_rotate s_rotate_notes s_rotate_moved s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
   "$scenario"
 done
 summary

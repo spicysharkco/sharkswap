@@ -12,8 +12,9 @@ It is a single binary written in Rust. There is no daemon and no service. The
 program needs no shell libraries, no `jq`, no `curl` and no Node. It does talk to
 other programs and to the network in a few places, and all of them are listed here:
 
-- Usage: `cs probe` (and `cs`, `cs status`, `cs best`, `cs bar` unless `QUICK=1`) make
-  one one-token HTTPS request per account, from inside the process.
+- Usage: `cs probe` makes one one-token HTTPS request per account, from inside the
+  process. `cs status` and `cs` make one, for the active account only, unless `QUICK=1`.
+  `cs best` and `cs bar` make none: they read the last recorded reading.
 - `cs token set <alias>` makes one one-token request with the new token, but only when
   the alias's saved login names an organization (see "Setting a one-year token").
 - `cs token check` makes one more HTTPS request, to the usage endpoint, and runs
@@ -45,7 +46,8 @@ the name it shows. Swapping the name without the token changes nothing real, so
 - Prints a parallel-terminal setup (`cs pane work`) so two accounts can run in two
   terminals at once, each in its own config directory.
 - Shows 5-hour and weekly use per account, read from the rate-limit headers of a
-  one-token request (`cs probe`, `cs`, `cs best`).
+  one-token request (`cs probe` records it; `cs`, `cs best` and `cs bar` show the last
+  recorded reading).
 - Ranks accounts by remaining room (`cs best`) and can switch to the best one.
 - Keeps per-account **ceilings**: stop using an account at, say, 80% of its 5-hour
   window, well before the provider refuses it.
@@ -169,16 +171,16 @@ claude
 
 | Command | What it does |
 |---|---|
-| `cs` | Overview: the active account, then every saved account with 5-hour and weekly use and reset times. Probes unless `QUICK=1`. |
+| `cs` | Overview: the active account, then every saved account with 5-hour and weekly use and reset times. Probes the active account unless `QUICK=1`; the other accounts show their last recorded reading. |
 | `cs <alias> [--force]` | Switch the live login to `alias` (token and display block). Refused with exit 75 when the account is over a ceiling, unless `--force`. Exit 76 when `SHARKSWAP_EXPECT_FROM` names another login than the active one (see Environment). |
 | `cs next` | Switch to the next saved account, round-robin, skipping accounts a ceiling refuses. |
 | `cs pane <alias> [--force]` | Print `export CLAUDE_CONFIG_DIR=...` (and a line that sets `CLAUDE_CODE_OAUTH_TOKEN` when the alias has a one-year token) for a parallel terminal. Use with `eval "$(cs pane alias)"`. |
-| `cs status` | Current account, token and login expiry, live usage (`QUICK=1` skips the probe). |
+| `cs status` | Current account, token and login expiry, live usage of the active account (`QUICK=1` skips the probe). |
 | `cs list` | Saved accounts, with a mark for a captured token and for an expired login. |
 | `cs save <alias> [--force]` | Snapshot the current login as `alias`. Refused when this login is already saved under an alias that has a ceiling, unless `--force`. |
 | `cs watch` | Run in the foreground and re-save the active token whenever it changes (Claude Code refreshes tokens). |
-| `cs best [--switch\|--raw]` | Rank saved accounts, most usable first. `--switch` moves to the top usable one. `--raw` prints tab-separated rows. |
-| `cs bar [alias]` | One status-bar line: `alias · 5h N% · wk N%`, plus age, login time left and any cap. |
+| `cs best [--switch\|--raw]` | Rank saved accounts by their recorded readings (sends no request), most usable first. `--switch` moves to the top usable one. `--raw` prints tab-separated rows. |
+| `cs bar [alias]` | One status-bar line from the recorded reading (sends no request): `alias · 5h N% · wk N%`, plus age, login time left and any cap. |
 | `cs probe [alias...]` | Send one 1-token request per account and record 5-hour and weekly use from the response headers. |
 | `cs token set\|rm\|list\|check\|print <alias>` | Manage one-year tokens from `claude setup-token`. `set [--force]` reads the token from stdin and checks its organization (see below). `check` asks the usage endpoint whether the token can read quota, and with `--model` sends one request through `claude -p`. `print` writes the token to standard output, only when that is not a terminal (see below). |
 | `cs remove <alias>` | Delete a saved account, its token and its pane directory. |
@@ -227,10 +229,11 @@ stderr says the organization was not checked. That happens when the saved login 
 organization, or one that is not a UUID (no request is made then), when the API does not
 answer, when its reply carries no organization id, two different ones or one that is not
 a UUID, and when the API answers 401, 403 or another error status without one. A 401
-note says to check that the whole token was pasted. A 403 whose organization is the saved
-one is stored with a note that the account is refused now. Accounts that share one
-organization, such as the members of a team plan, cannot be told apart this way: a token
-from any of them passes.
+note says to check that the whole token was pasted. The 401 and 403 notes carry the
+message from the API's error body, as `cs probe` prints it (see "Usage probe"). A 403
+whose organization is the saved one is stored with a note that the account is refused
+now. Accounts that share one organization, such as the members of a team plan, cannot be
+told apart this way: a token from any of them passes.
 
 ## Ceilings
 
@@ -480,16 +483,35 @@ tell. Nothing recovers by itself.
 
 ## Usage probe
 
-`cs probe` (and `cs`, `cs status`, `cs best` unless `QUICK=1`) sends one request with
-`max_tokens: 1` per account to the Anthropic API and reads the
-`anthropic-ratelimit-unified-5h-*` and `-7d-*` response headers. A reading is trusted
-for 24 hours (`PROBE_MAX_AGE_HOURS` changes that). The request carries the system
+`cs probe` sends one request with `max_tokens: 1` per account (or per alias named) to the
+Anthropic API and reads the `anthropic-ratelimit-unified-5h-*` and `-7d-*` response
+headers. `cs status` and `cs` send it for the active account only, unless `QUICK=1`.
+`cs best` and `cs bar` send nothing: they read the last recorded reading. A reading is
+trusted for 24 hours (`PROBE_MAX_AGE_HOURS` changes that). The request carries the system
 prompt and beta header that Claude Code itself sends. It uses the model in
 `SHARKSWAP_PROBE_MODEL` (default `claude-haiku-4-5-20251001`).
 
 An answer of 200 means the account is usable. A rejected 5-hour or weekly window means
 it is out, with the reset time. Anything else (network error, 5xx, an unexpected
 status) is "unknown", never "out".
+
+A 401 or 403 shows as `AUTH 401` or `AUTH 403` in the table. For each such account
+`cs probe` (and `cs`, `cs status`, for the active account) then prints one line below the
+table, on stderr, with the message from the API's error body, for example
+
+```
+sharkswap probe: work: refused with 403: OAuth authentication is currently not allowed for this organization.
+  The organization does not allow this login now; check the account's subscription or billing.
+```
+
+The message is cut to 120 printable ASCII characters. Only the error body is read, up to
+8 KiB, and never a header or the token. No line is printed when the body is over 8 KiB,
+is not JSON, is empty or has no message, or when the message holds the token or any 24
+consecutive characters of it (looked for as sent and as printed); the table cell is the
+same then. The second line is added for that one 403 message, which in practice means the
+account's subscription is not active; paying again restores the same login. The message
+is not recorded: `cs best`, `cs bar` and the `--raw` output read the saved reading and
+are the same as before.
 
 ## Environment
 

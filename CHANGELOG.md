@@ -9,6 +9,15 @@ version (0.x.0) may change commands, output or file formats.
 
 ### Changed
 
+- `cs probe` (and `cs`, `cs status`) print, below the table, one line on stderr for each
+  account the API answered with 401 or 403, with the message from the error body (printable
+  ASCII, cut to 120 characters; the body is read up to 8 KiB, never a header or the
+  token). No line is printed for a body over 8 KiB, one that is not JSON or is empty, or
+  a message that holds the token or any 24 consecutive characters of it. For the 403
+  "OAuth authentication is currently not allowed for this organization." a second line
+  says the organization does not allow this login now and to check the account's
+  subscription or billing. The table cell is still `AUTH 403`, and `best`, `bar` and the
+  `--raw` output are unchanged.
 - `cs token set <alias>` compares the organization the API places the new token in (the
   `anthropic-organization-id` header of one one-token request, which can take up to 30
   seconds) with the `organizationUuid` of the alias's saved login. A token from another
@@ -18,7 +27,8 @@ version (0.x.0) may change commands, output or file formats.
   anyway. When the two cannot be compared, the token is stored as before with a note: the
   saved login names no organization id or one that is not a UUID, the API did not answer,
   or its reply has no valid organization id (a 401, a 403 or another error status say so
-  in their own note). Accounts that share one organization cannot be told apart this way.
+  in their own note; the 401 and 403 notes carry the message from the error body).
+  Accounts that share one organization cannot be told apart this way.
 
 ### Fixed
 
