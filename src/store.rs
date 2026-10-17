@@ -13,6 +13,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const KEYCHAIN_SVC: &str = "Claude Code-credentials";
 pub const DAY: i64 = 86_400;
+/// Set by `rotate` for its own switch: the email of the login its decision was
+/// made from, empty when there was none. The switch compares it with the active
+/// login once it holds the identity lock, and changes nothing when they differ.
+/// Unset or empty, nothing is compared.
+pub const EXPECT_FROM: &str = "SHARKSWAP_EXPECT_FROM";
+/// The exit status of a switch that found another login active than the one
+/// `EXPECT_FROM` names.
+pub const EXIT_MOVED: i32 = 76;
 
 /// Every path the tool uses, resolved once from `$HOME`.
 pub struct Ctx {
@@ -192,7 +200,12 @@ impl Ctx {
 
     /// The saved alias whose metadata holds the live email, first by name.
     pub fn current_alias(&self) -> String {
-        let email = self.current_email();
+        self.alias_of(&self.current_email())
+    }
+
+    /// The saved alias whose metadata holds `email`, first by name; empty when
+    /// there is none.
+    pub fn alias_of(&self, email: &str) -> String {
         if email.is_empty() {
             return String::new();
         }
@@ -213,6 +226,16 @@ impl Ctx {
             }
         }
         String::new()
+    }
+
+    /// How a message names the login with this email: its saved alias, else the
+    /// email, else "none".
+    pub fn login_name(&self, email: &str) -> String {
+        match self.alias_of(email) {
+            a if !a.is_empty() => a,
+            _ if email.is_empty() => "none".into(),
+            _ => email.into(),
+        }
     }
 
     // ---- expiry texts -------------------------------------------------------

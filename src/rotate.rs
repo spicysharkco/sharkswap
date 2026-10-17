@@ -50,7 +50,10 @@
 
 use crate::caps::{Caps, ceiling_of, effective_caps};
 use crate::probe::{Cred, Reply, ask, file_login, probe_cred, probe_model};
-use crate::store::{COMMAND_WORDS, Ctx, Spelling, alias_ok, alias_spelling, valid_oauth_file};
+use crate::store::{
+    COMMAND_WORDS, Ctx, EXIT_MOVED, EXPECT_FROM, Spelling, alias_ok, alias_spelling,
+    valid_oauth_file,
+};
 use crate::switch_intent;
 use crate::util::*;
 use serde_json::{Map, Value};
@@ -1463,6 +1466,16 @@ fn unfinished_switch(ctx: &Ctx, run: &Run, to: &str, doing: &str) -> bool {
     }
 }
 
+/// Whether the switch run for this rotation stopped because another login was
+/// active than the one it decided from. The status alone is not enough: the
+/// child's own error line says why it stopped.
+fn switch_moved(rc: i32, out_text: &str) -> bool {
+    rc == EXIT_MOVED
+        && out_text
+            .split('\n')
+            .any(|l| l.starts_with("error: the active login is "))
+}
+
 pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
     let cfg = xdg("XDG_CONFIG_HOME", &ctx.home, ".config");
     let state = xdg("XDG_STATE_HOME", &ctx.home, ".local/state");
@@ -1559,7 +1572,8 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
     // never left for that. No login at all is a record of its own, a refusal:
     // there is nothing to wait for, and a host without one is better off on any
     // account than on none.
-    let cur = ctx.current_alias();
+    let cur_email = ctx.current_email();
+    let cur = ctx.alias_of(&cur_email);
     // An empty alias would send this down the live-credentials branch below.
     if unfinished_switch(ctx, &run, "", "rotating") {
         return Err(1);
@@ -1790,6 +1804,12 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
     // ceiling was already judged, above, from the readings this run took a moment
     // ago; `sharkswap <alias>` alone would judge it again from
     // availability.json, which this run does not write.
+    //
+    // EXPECT_FROM names the login this decision was made from, by email, so a
+    // login that is not a saved account is covered too. The probes above take
+    // seconds, and the child takes the identity lock only after them: once it
+    // holds the lock it checks the active login again, and when that is no
+    // longer this one it changes nothing and exits EXIT_MOVED.
     let tmpdir = match env_or_empty("TMPDIR") {
         t if t.is_empty() => "/tmp".to_string(),
         t => t,
@@ -1812,6 +1832,7 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
             .arg(&target)
             .arg("--force")
             .env("ASSUME_YES", "1")
+            .env(EXPECT_FROM, &cur_email)
             .env("PATH", &child_path)
             .stdout(Stdio::from(f))
             .stderr(Stdio::from(g))
@@ -1821,6 +1842,18 @@ pub fn cmd_rotate(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
     let out_text = read_text(&out_path).unwrap_or_default();
     rm_f(&out_path);
     OUT_MADE.store(false, Ordering::SeqCst);
+
+    // Another switch ran first. Nothing was changed, and the decision no longer
+    // describes the host: not a failure (no failed target, no switch time, no
+    // warm-up), the next run decides again from the login it finds.
+    if switch_moved(rc, &out_text) {
+        run.log(&format!(
+            "  switch to {target} not run: the active login is '{}' now, not '{}' where this run decided; another switch ran first, nothing is switched this run",
+            ctx.login_name(&ctx.current_email()),
+            ctx.login_name(&cur_email)
+        ));
+        return Ok(());
+    }
 
     // A child that left its intent behind has not switched or failed in any way
     // that is safe to write down: no switch time and no failure, so no cooldown
@@ -2504,6 +2537,18 @@ mod tests {
         );
         assert!(denied_by_replies(&[&reply(403, json!({}))]));
         assert!(!denied_by_replies(&[&reply(429, json!({}))]));
+    }
+
+    #[test]
+    fn a_switch_that_exits_76_without_the_moved_line_is_not_a_moved_switch() {
+        let moved = "error: the active login is 'a', not 'b'; nothing was changed (set by SHARKSWAP_EXPECT_FROM)\n";
+        assert!(switch_moved(EXIT_MOVED, moved));
+        assert!(!switch_moved(EXIT_MOVED, ""));
+        assert!(!switch_moved(EXIT_MOVED, "error: something else\n"));
+        assert!(
+            !switch_moved(1, moved),
+            "the line alone is not enough either"
+        );
     }
 
     #[test]

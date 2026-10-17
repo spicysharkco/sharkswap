@@ -531,6 +531,23 @@ fn remove_new_creds(creds: &Path, not_restored: &mut Vec<String>) {
 fn apply_block(ctx: &Ctx, alias: &str) -> Res {
     let src = ctx.meta(alias);
     let lock = IdLock::acquire(ctx)?;
+    // `rotate` names the login its decision was made from. It judged that before
+    // probing and before this process took the lock, so it is checked again here,
+    // before anything is written. The lock excludes only other sharkswap switches,
+    // not `claude /login` or a token refresh: this narrows the window, it does not
+    // close it. Unset for every other caller.
+    let expect = env_or_empty(EXPECT_FROM);
+    if !expect.is_empty() {
+        let now = ctx.current_email();
+        if now != expect {
+            eprintln!(
+                "error: the active login is '{}', not '{}'; nothing was changed (set by {EXPECT_FROM})",
+                ctx.login_name(&now),
+                ctx.login_name(&expect)
+            );
+            return Err(EXIT_MOVED);
+        }
+    }
     let tok_block = ctx.token_oauth_block(alias);
     if !valid_metadata_file(&src) || (tok_block.is_none() && !valid_oauth_file(&ctx.snap(alias))) {
         eprintln!("error: account '{alias}' has malformed metadata or credentials");

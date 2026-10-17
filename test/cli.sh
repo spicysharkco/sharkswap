@@ -1252,6 +1252,137 @@ s_rotate_notes() {
   stub_stop
 }
 
+# Rotate decides from one login, probes for seconds, then runs the switch in a
+# process of its own. A hand switch in that window must not be overwritten by the
+# older decision, and rotate must not treat the refusal as a failure.
+s_rotate_moved() {
+  section "rotate when the login moves under it"
+  new_world rotate-moved
+  save_as work alice@example.com 1
+  save_as personal bob@example.com 2
+  save_as third carol@example.com 3
+  stub_start
+  stub_route 1 work 429 "$(rl_headers 1.0 0.40 rejected allowed)"
+  stub_route 2 personal 200 "$(rl_headers 0.10 0.20)" 3000
+  cs work
+  mkdir -p "$W/config/sharkswap"
+  printf 'personal\nwork\n' > "$W/config/sharkswap/pool"
+  local log="$W/state/sharkswap-rotate.log" st="$W/state/sharkswap-rotate.json" rc=0
+  local lock="$H/.sharkswap/.identity.lock"
+
+  # The decision (work is refused, personal is the target) is made from work before
+  # the slow probe of personal ends; the hand switch to third lands while it waits.
+  : > "$CLAUDE_LOG"
+  cs_bg rotate
+  wait_for_text "rotate has sent its probe to personal" "$STUB_LOG" ' personal '
+  cs third
+  assert_rc "the hand switch to third" 0
+  wait "$BG_PID" || rc=$?
+  assert_eq "rotate exits 0" "0" "$rc"
+  assert_eq "the login stays where the hand switch left it" "carol@example.com" "$(live_email)"
+  assert_eq "and so does its token" "$(fake_token 3)" "$(live_token)"
+  assert_eq "the log says the older decision was not run" "1" "$(grep -c "switch to personal not run: the active login is 'third' now, not 'work' where this run decided" "$log" || true)"
+  assert_eq "it is not logged as a failure" "0" "$(grep -c 'ERROR\|NOT verified\|verified' "$log" || true)"
+  assert_eq "no warm-up runs" "0" "$(grep -c -- '-p reply OK' "$CLAUDE_LOG" || true)"
+  assert_eq "no switch time is recorded, so no gap holds the next run back" "false" "$(jq 'has("last_switch")' "$st")"
+  assert_eq "no failed target is recorded" "false" "$(jq 'has("failed")' "$st")"
+  assert_no_file "the identity lock is released" "$lock"
+
+  # Guards a check made before the identity lock instead of under it: work is still
+  # active when such a check runs, and the switch would overwrite third once the
+  # lock came free. Another switch holds the lock (no switch-in-progress marker,
+  # which would make the child refuse at once) while the login moves to third.
+  mk_login alice@example.com 1
+  live_holder
+  rm -f "$lock/switch-pending"
+  CS_ENV=(SHARKSWAP_EXPECT_FROM=alice@example.com SHARKSWAP_LOCK_ATTEMPTS=400 SHARKSWAP_LOCK_DELAY=0.05)
+  cs_bg personal --force
+  CS_ENV=()
+  # The plan is the last thing the switch writes before it goes for the lock.
+  wait_for_text "the switch has printed its plan and is on its way to the lock" "$W/bg-out.txt" "to   : personal"
+  mk_login carol@example.com 3
+  holder_done
+  RC=0; wait "$BG_PID" || RC=$?
+  holder_dies
+  OUT="$(cat "$W/bg-out.txt")"; ERR="$(cat "$W/bg-err.txt")"
+  assert_rc "a login that moves while the switch waits for the lock: exit 76" 76
+  assert_err_has "and the line names both logins" "error: the active login is 'third', not 'work'; nothing was changed"
+  assert_eq "and the login that moved is not overwritten once the lock is free" "carol@example.com" "$(live_email)"
+  assert_no_file "and no lock is left" "$lock"
+
+  # The switch alone, as rotate starts it: SHARKSWAP_EXPECT_FROM is the email of the
+  # login the decision was made from. Each case names the failure it guards.
+  # Guards a switch that ignores the expectation.
+  CS_ENV=(SHARKSWAP_EXPECT_FROM=alice@example.com)
+  cs personal --force
+  assert_rc "a switch expecting another login exits 76" 76
+  assert_err_has "and says what is active, and where the expectation came from" "error: the active login is 'third', not 'work'; nothing was changed (set by SHARKSWAP_EXPECT_FROM)"
+  assert_eq "it changes nothing" "carol@example.com" "$(live_email)"
+  assert_eq "not the token either" "$(fake_token 3)" "$(live_token)"
+  assert_no_file "and leaves no lock" "$lock"
+  # Guards an active login without an alias reading as no login, or as a match.
+  mk_login dave@example.com 4
+  cs personal --force
+  assert_rc "an active login that is not saved is not the expected one" 76
+  assert_err_has "it is named by its email" "error: the active login is 'dave@example.com', not 'work'; nothing was changed"
+  assert_eq "and nothing is changed" "dave@example.com" "$(live_email)"
+  # Guards logins compared by saved name: two different logins that are both unsaved
+  # have the same (empty) name, and the switch must still tell them apart.
+  CS_ENV=(SHARKSWAP_EXPECT_FROM=dave@example.com)
+  mk_login erin@example.com 5
+  cs personal --force
+  assert_rc "a switch expecting one unsaved login while another unsaved one is active" 76
+  assert_err_has "it names both by email" "error: the active login is 'erin@example.com', not 'dave@example.com'; nothing was changed"
+  assert_eq "and the login that is active is not overwritten" "erin@example.com" "$(live_email)"
+  mk_login dave@example.com 4
+  # Guards a decision from a login without an alias being refused (or unchecked).
+  CS_ENV=(SHARKSWAP_EXPECT_FROM=dave@example.com)
+  cs personal --force
+  assert_rc "a switch expecting the unsaved login that is still active" 0
+  assert_eq "makes its change" "bob@example.com" "$(live_email)"
+  # Guards a decision from an unsaved login being overwritten by a saved one.
+  cs work --force
+  assert_rc "a switch expecting an unsaved login while a saved one is active" 76
+  assert_err_has "it names the saved login and the unsaved one" "error: the active login is 'personal', not 'dave@example.com'; nothing was changed"
+  assert_eq "and nothing is changed" "bob@example.com" "$(live_email)"
+  # Guards a false mismatch when an alias for the expected login is saved after
+  # the decision (the email is the same, only its name changed).
+  CS_ENV=()
+  save_as dave dave@example.com 4
+  CS_ENV=(SHARKSWAP_EXPECT_FROM=dave@example.com)
+  cs personal --force
+  assert_rc "a switch expecting a login whose alias was saved since" 0
+  assert_eq "makes its change" "bob@example.com" "$(live_email)"
+  # Guards an empty expectation counted as a mismatch.
+  CS_ENV=(SHARKSWAP_EXPECT_FROM=)
+  cs work --force
+  assert_rc "an empty expected login is not checked" 0
+  assert_eq "so the switch is made" "alice@example.com" "$(live_email)"
+  # Guards a matching expectation refused.
+  CS_ENV=(SHARKSWAP_EXPECT_FROM=alice@example.com)
+  cs personal --force
+  assert_rc "a switch expecting the active login" 0
+  assert_eq "still switches" "bob@example.com" "$(live_email)"
+  CS_ENV=()
+
+  # Guards rotate leaving the variable alone when it has no login to name: a value
+  # exported in its environment would reach the switch and be held against a host
+  # that has no login. No login at all is a refusal, so rotate moves to the pool.
+  stub_route 2 personal 200 "$(rl_headers 0.10 0.20)"
+  mk_login bob@example.com 2 1000
+  printf '{}\n' > "$H/.claude.json"
+  printf '{}\n' > "$H/.claude/.claude.json"
+  local before; before="$(wc -l < "$log")"
+  CS_ENV=(SHARKSWAP_EXPECT_FROM=stale@example.com)
+  cs rotate
+  assert_rc "rotate with no login and a stale export" 0
+  assert_eq "it switches to the pool as a run without the export does" "bob@example.com" "$(live_email)"
+  assert_eq "and logs the switch as made" "1" "$(tail -n +"$((before + 1))" "$log" | grep -c 'now on personal; verified' || true)"
+  assert_eq "the switch is not held against the stale value" "0" "$(tail -n +"$((before + 1))" "$log" | grep -c 'not run: the active login is' || true)"
+  CS_ENV=()
+  stub_stop
+}
+
 s_remove() {
   section "remove"
   new_world remove
@@ -1578,7 +1709,7 @@ s_fifo_store() {
   stub_stop
 }
 
-for scenario in s_save_and_list s_switch s_keychain_path s_switch_intent s_switch_intent_rotate s_switch_live s_pane s_token s_probe s_gate s_best_and_bar s_rotate s_rotate_notes s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
+for scenario in s_save_and_list s_switch s_keychain_path s_switch_intent s_switch_intent_rotate s_switch_live s_pane s_token s_probe s_gate s_best_and_bar s_rotate s_rotate_notes s_rotate_moved s_remove s_overview_and_status s_symlinked_store s_fifo_store s_install s_contained s_help_and_dispatch; do
   "$scenario"
 done
 summary

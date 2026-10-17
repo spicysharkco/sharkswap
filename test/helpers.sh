@@ -214,6 +214,18 @@ cs_bg() {
   BG_PID=$!
 }
 
+# wait_for_text NAME FILE TEXT: wait up to 10 s for FILE to hold the fixed string
+# TEXT, a line the code under test writes. A timeout fails NAME with a message and
+# goes on, so a scenario that never gets there reports it instead of passing quietly.
+wait_for_text() {
+  local n
+  for n in $(seq 1 200); do
+    if grep -qF -- "$3" "$2" 2>/dev/null; then pass "$1"; return 0; fi
+    sleep 0.05
+  done
+  fail "$1" "timed out after 10 s waiting for [$3] in $2"
+}
+
 # fake_token N: a made-up OAuth access token, only ever valid against the stub.
 fake_token() { printf 'fake-access-%s' "$1"; }
 

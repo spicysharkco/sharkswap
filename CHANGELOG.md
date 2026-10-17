@@ -5,6 +5,22 @@ All notable changes to sharkswap are listed here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0, a minor
 version (0.x.0) may change commands, output or file formats.
 
+## [Unreleased]
+
+### Fixed
+
+- `cs rotate` no longer overwrites a login you switched to by hand while it was
+  probing. Rotation now tells its own switch the email of the login the decision was made
+  from (`SHARKSWAP_EXPECT_FROM`), and that switch checks the active login again once it
+  holds the identity lock, so a login that is not a saved account is covered too. If it
+  moved, nothing is changed, the switch prints `error: the active login is '<now>', not
+  '<expected>'; nothing was changed (set by SHARKSWAP_EXPECT_FROM)` and exits 76, and
+  rotation logs that it did not run, with no warm-up request, no recorded failure and no
+  switch time. The next run decides again. The check is skipped when rotation found no
+  email (no login, or `.claude.json` unreadable or without an email at that moment). The
+  lock stops only other sharkswap switches, not a login or token refresh by another
+  program, so the check narrows the window rather than closing it.
+
 ## [0.3.0] - 2026-10-17
 
 ### Added
@@ -96,6 +112,7 @@ numbered as a beta from 0.2.0 on, and this entry carries the number it should ha
 - `cs watch`, which re-saves the active token whenever Claude Code refreshes it.
 - macOS Keychain support through `/usr/bin/security`, and file-based logins on Linux.
 
+[Unreleased]: https://github.com/spicysharkco/sharkswap/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/spicysharkco/sharkswap/releases/tag/v0.3.0
 [0.2.0]: https://github.com/spicysharkco/sharkswap/releases/tag/v0.2.0
 [0.1.0]: https://github.com/spicysharkco/sharkswap/tree/f0edcbb2040824a4d541f104e0475f845c914bbe

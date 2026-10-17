@@ -168,7 +168,7 @@ claude
 | Command | What it does |
 |---|---|
 | `cs` | Overview: the active account, then every saved account with 5-hour and weekly use and reset times. Probes unless `QUICK=1`. |
-| `cs <alias> [--force]` | Switch the live login to `alias` (token and display block). Refused with exit 75 when the account is over a ceiling, unless `--force`. |
+| `cs <alias> [--force]` | Switch the live login to `alias` (token and display block). Refused with exit 75 when the account is over a ceiling, unless `--force`. Exit 76 when `SHARKSWAP_EXPECT_FROM` names another login than the active one (see Environment). |
 | `cs next` | Switch to the next saved account, round-robin, skipping accounts a ceiling refuses. |
 | `cs pane <alias> [--force]` | Print `export CLAUDE_CONFIG_DIR=...` (and a line that sets `CLAUDE_CODE_OAUTH_TOKEN` when the alias has a one-year token) for a parallel terminal. Use with `eval "$(cs pane alias)"`. |
 | `cs status` | Current account, token and login expiry, live usage (`QUICK=1` skips the probe). |
@@ -288,6 +288,20 @@ or a script can tell apart from a run that finished. The operating system drops 
 lock when the run ends, however it ends, so a crashed run never leaves a stale lock
 behind. The switch itself is `cs <target> --force` run non-interactively, followed by a
 check that the live login changed.
+
+Probing takes seconds, so you may switch by hand while a run is deciding. The run tells
+its switch which login the decision was made from, and that switch checks the active
+login again once it holds the identity lock. If it is no longer that login, the switch
+changes nothing, prints `error: the active login is '<now>', not '<expected>'; nothing
+was changed (set by SHARKSWAP_EXPECT_FROM)` and exits 76. The run logs that it did not
+switch, and treats it as neither a failure nor a switch: no warm-up request, no failed
+target, no switch time, so the next run decides again from the login it finds. The
+logins are compared by email, so the check also holds when the run decided from a login
+that is not a saved account; the messages name a login by its alias, or by its email
+when it has none. The check is skipped when the run found no email to name at that
+moment (no login, or `.claude.json` unreadable or without an email). The lock stops only
+other sharkswap switches, not a login or token refresh by another program, so the check
+narrows the window rather than closing it.
 
 ## Where things are stored
 
@@ -454,6 +468,7 @@ status) is "unknown", never "out".
 |---|---|
 | `QUICK=1` | `cs` and `cs status` skip the live probe. |
 | `ASSUME_YES=1` | Do not ask for confirmation before a switch (rotation sets it for its own switch). |
+| `SHARKSWAP_EXPECT_FROM` | An email: the switch makes its change only if that is the active login's email once it holds the identity lock; otherwise it changes nothing and exits 76. Rotation sets it for its own switch; it is empty when rotation found no email (no login, or `.claude.json` unreadable or without an email at that moment), and an empty value skips the check. Leave it unset by hand: while it is exported, a switch (`cs <alias>`, `cs next`) exits 76 whenever the active login is another one than the exported value. |
 | `PROBE_MAX_AGE_HOURS` | How long a probe reading is trusted (default 24). |
 | `STALE_DAYS` | Age after which a saved login without a one-year token shows as `STALE` (default 7). |
 | `WATCH_INTERVAL` | Seconds between checks in `cs watch` (default 10; 30 on macOS with a Keychain-only login, where each check runs `security`). |
