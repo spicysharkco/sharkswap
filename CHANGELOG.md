@@ -5,6 +5,21 @@ All notable changes to sharkswap are listed here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0, a minor
 version (0.x.0) may change commands, output or file formats.
 
+## [0.3.0] - 2026-10-17
+
+### Added
+
+- `--version` and `-V` print the version (`sharkswap 0.3.0`) and exit. Both words are
+  reserved, so `save` refuses them as alias names, and an existing alias spelled like
+  either word can still be removed but not switched to.
+- `SECURITY.md`: report a vulnerability through GitHub private vulnerability reporting.
+
+### Changed
+
+- `help`, `-h`, `--help`, `--version` and `-V` no longer create `~/.sharkswap` or change
+  its mode: they print their text and exit.
+- The release smoke test checks that the unpacked binary prints the version being released.
+
 ## [0.2.0] - 2026-10-16
 
 ### Added
@@ -81,5 +96,6 @@ numbered as a beta from 0.2.0 on, and this entry carries the number it should ha
 - `cs watch`, which re-saves the active token whenever Claude Code refreshes it.
 - macOS Keychain support through `/usr/bin/security`, and file-based logins on Linux.
 
+[0.3.0]: https://github.com/spicysharkco/sharkswap/releases/tag/v0.3.0
 [0.2.0]: https://github.com/spicysharkco/sharkswap/releases/tag/v0.2.0
 [0.1.0]: https://github.com/spicysharkco/sharkswap/tree/f0edcbb2040824a4d541f104e0475f845c914bbe
