@@ -1,0 +1,84 @@
+name: Bug report
+description: sharkswap did something wrong, or failed to do something it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste a token or a credentials file here.** These can hold a live login or
+        other secrets, and anyone who reads a login can use that account:
+
+        - the output of `sharkswap token print` or `claude setup-token`
+        - the value of `CLAUDE_CODE_OAUTH_TOKEN`, set by the line that `sharkswap pane` prints for
+          an account with a one-year token; the output of `env` or `set -x` can show it
+        - `~/.claude/.credentials.json`, `~/.claude.json` and `~/.claude/.claude.json`, and the
+          `*.backup.*` and `*.switch-backup.*` copies that an interrupted or failed switch
+          leaves beside them
+        - anything under `~/.sharkswap/`
+        - the Claude Code entry in the macOS Keychain
+
+        Editing an issue or a comment does not remove what it said: GitHub keeps the edit
+        history. If a token gets in, say so in the issue and the issue or comment will be
+        deleted, but deleting does not undo the exposure, so treat that login as compromised.
+
+        Command output can show account email addresses and your home directory; replace
+        them if you prefer. A security problem goes to
+        [private vulnerability reporting](https://github.com/spicysharkco/sharkswap/security/policy)
+        instead.
+  - type: input
+    id: version
+    attributes:
+      label: sharkswap version
+      description: The output of `sharkswap --version`.
+      placeholder: sharkswap 0.5.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS, Apple silicon
+        - macOS, Intel
+        - Linux, x86_64
+        - Linux, arm64
+        - Other (say which below)
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installed from
+      options:
+        - Release archive
+        - cargo binstall
+        - Source build or cargo install
+        - Other (say which below)
+    validations:
+      required: true
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code version
+      description: The output of `claude --version`, if you have Claude Code installed.
+  - type: textarea
+    id: happened
+    attributes:
+      label: What you ran and what happened
+      description: The command, its output, and its exit status (`echo $?` right after it).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Before you submit
+      options:
+        - label: This report holds no token, no copy of a file or folder listed at the top and nothing from the Keychain entry.
+          required: true
