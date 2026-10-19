@@ -8,6 +8,30 @@ accounts from the command line, see how much of each account's 5-hour and weekly
 allowance is used, and (optionally) let a timer move your login to another
 account when the current one runs out.
 
+Three saved accounts, one of them out of its 5-hour window (`cs` is a short name
+for `sharkswap`; the accounts are fake and the API is a stub):
+
+```text
+$ cs probe
+ALIAS     STATUS   5H    WEEK  WEEK-RESET          5H-RESET
+personal  ok       12    31    Sat 08:56 in 5d08h  in 3h43m
+side      5H FULL  100!  47    Tue 12:56 in 1d12h  in 0h44m
+work      ok       82    64    Thu 12:56 in 3d12h  in 1h25m
+
+$ cs best
+Accounts, most usable first (ranked by max(WK, 5H); blocked and dead snapshots last):
+  Percentages come from 'sharkswap probe' (rate-limit headers), a few points above the usage page.
+  PROBE-OK = answered, no windows read. PROBE-? = never probed or the reading is old. PROBE-ERR = token refused.
+  BLOCKED = 5h window spent. SPENT = week spent or refused. STALE/EXPIRED = saved login too old or lapsed.
+  ALIAS           WK    5H  WK-RESET   5H-RESET     AGE  STATE
+  personal       31%   12%  in 5d08h   in 3h43m    0.0d  fresh
+  work           64%   82%  in 3d12h   in 1h25m    0.0d  fresh
+  side           47%  100%  in 1d12h   in 0h44m    0.0d  BLOCKED
+
+$ cs bar
+work · 5h 82% · wk 64%
+```
+
 It is a single binary written in Rust. There is no daemon and no service. The
 program needs no shell libraries, no `jq`, no `curl` and no Node. It does talk to
 other programs and to the network in a few places, and all of them are listed here:
