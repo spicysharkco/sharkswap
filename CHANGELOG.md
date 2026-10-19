@@ -7,6 +7,20 @@ version (0.x.0) may change commands, output or file formats.
 
 ## [Unreleased]
 
+### Changed
+
+- Any switch (`cs <alias>`, `cs next`, `cs best --switch`) prints a `note:` line on stderr
+  for each of these variables found in the shell's environment, because a `claude` started
+  there can keep using another login: `CLAUDE_CONFIG_DIR` (in a `cs pane` shell the note
+  names the pane's alias, and says nothing when the switch is to that same alias),
+  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+  `ANTHROPIC_PROFILE`, both `ANTHROPIC_FEDERATION_RULE_ID` and `ANTHROPIC_ORGANIZATION_ID`,
+  and a truthy `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+  `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE` or `CLAUDE_CODE_USE_ANTHROPIC_AWS`.
+  Before, the switch printed `Done` and the shell went on with the old login and no hint.
+  A note never stops or changes a switch, and no credential value is printed. On Linux,
+  `CLAUDE_CONFIG_DIR` set to `~/.claude` is not noted.
+
 ## [0.5.0] - 2026-10-19
 
 ### Changed

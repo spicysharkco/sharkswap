@@ -8,6 +8,7 @@ use crate::store::*;
 use crate::switch_intent;
 use crate::util::*;
 use serde_json::{Map, Value};
+use std::ffi::OsString;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -827,6 +828,94 @@ fn apply_block(ctx: &Ctx, alias: &str) -> Res {
     Ok(())
 }
 
+/// Whether two directories are the same one: equal as paths, or, when both can be
+/// resolved, equal once symbolic links and `..` are gone (a symlinked `$HOME`).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
+/// What in the environment can keep a `claude` started from this shell from using
+/// the login a switch to `target` writes. Only variable names are reported, never a
+/// value other than the config directory path. Paths are compared as the raw bytes
+/// the environment holds; text is made of them only for a truthy check or a note.
+fn shadow_notes(ctx: &Ctx, target: &str, get: impl Fn(&str) -> OsString) -> Vec<String> {
+    let mut notes = Vec::new();
+    let cfg = get("CLAUDE_CONFIG_DIR");
+    if !cfg.is_empty() {
+        let dir = Path::new(&cfg);
+        // Only the pane home itself: a deeper directory keeps its own login.
+        let pane = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|a| alias_ok(a, false))
+            .filter(|_| dir.parent().is_some_and(|d| same_dir(d, &ctx.homes)));
+        // Any other directory is noted, except `~/.claude` on Linux: it holds the very
+        // file the switch writes. On a Mac its Keychain entry is keyed to the directory.
+        if let Some(alias) = pane {
+            // A pane for the account being switched to already uses it.
+            if alias != target {
+                notes.push(format!(
+                    "this shell is sharkswap pane '{alias}'; a claude started here keeps that login, other new sessions get this switch"
+                ));
+            }
+        } else if ctx.darwin || !same_dir(dir, &ctx.home.join(".claude")) {
+            notes.push(format!(
+                "CLAUDE_CONFIG_DIR is {:?}; a claude started here reads that directory's login, not the one this switch sets",
+                cfg.to_string_lossy()
+            ));
+        }
+    }
+    for name in [
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_MANTLE",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    ] {
+        let v = get(name);
+        let v = v.to_string_lossy();
+        let v = v.trim();
+        if ["1", "true", "yes", "on"]
+            .iter()
+            .any(|t| v.eq_ignore_ascii_case(t))
+        {
+            notes.push(format!(
+                "{name} selects a cloud provider; a claude started here can use it instead of this login"
+            ));
+        }
+    }
+    for name in [
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ] {
+        if !get(name).is_empty() {
+            notes.push(format!(
+                "{name} is set; a claude started here can use it instead of the login this switch sets"
+            ));
+        }
+    }
+    if !get("ANTHROPIC_PROFILE").is_empty() {
+        notes.push(
+            "ANTHROPIC_PROFILE is set; a claude started here can use that profile instead of the login this switch sets"
+                .to_string(),
+        );
+    }
+    if !get("ANTHROPIC_FEDERATION_RULE_ID").is_empty()
+        && !get("ANTHROPIC_ORGANIZATION_ID").is_empty()
+    {
+        notes.push(
+            "ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_ORGANIZATION_ID are set; a claude started here can use federation instead of this login"
+                .to_string(),
+        );
+    }
+    notes
+}
+
 pub fn cmd_switch(ctx: &Ctx, args: &[String]) -> Res {
     let (alias, force) = alias_force(args);
     check_alias(&alias, false)?;
@@ -881,6 +970,10 @@ pub fn cmd_switch(ctx: &Ctx, args: &[String]) -> Res {
         println!("  token: one-year (no refresh token, no race; running sessions follow)");
     } else {
         println!("  token: login snapshot (real switch)");
+    }
+    // A hint, never a refusal: the switch is still right for every other session.
+    for note in shadow_notes(ctx, &alias, |n| std::env::var_os(n).unwrap_or_default()) {
+        eprintln!("note: {note}");
     }
     // The ceiling refusal comes before the prompt and nothing in the environment lifts it.
     shared_gate(
@@ -1843,5 +1936,209 @@ mod tests {
         let ctx = Ctx::at(home.to_path_buf(), true).unwrap_or_else(|_| panic!("a context"));
         std::fs::remove_dir_all(&ctx.store).expect("rmdir");
         assert_eq!(save_prior_login(&ctx, "{}"), None);
+    }
+
+    /// A context whose home is `<root>/real`, with the default directory and a pane
+    /// home made; `<root>/link` is a symbolic link to the home.
+    fn shadow_ctx(darwin: bool) -> (TestStore, Ctx) {
+        let root = TestStore::new(&[]);
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join(".claude")).expect("the default directory");
+        std::fs::create_dir_all(real.join(".sharkswap/homes/work")).expect("a pane home");
+        std::os::unix::fs::symlink(&real, root.join("link")).expect("a link to the home");
+        let mut ctx = Ctx::at(real, true).unwrap_or_else(|_| panic!("a context"));
+        ctx.darwin = darwin;
+        (root, ctx)
+    }
+
+    /// The notes for a switch to `target` from a shell with exactly `env` set.
+    fn shadow_notes_for(ctx: &Ctx, target: &str, env: &[(&str, &str)]) -> Vec<String> {
+        shadow_notes(ctx, target, |name| {
+            env.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| OsString::from(v))
+                .unwrap_or_default()
+        })
+    }
+
+    /// Each of the five cloud flags is reported when it is truthy (`1`, `true`, `yes`
+    /// or `on`, in any case, around any spaces) and in no other case.
+    #[test]
+    fn a_cloud_flag_is_noted_only_when_truthy() {
+        let (_root, ctx) = shadow_ctx(false);
+        for name in [
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "CLAUDE_CODE_USE_MANTLE",
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        ] {
+            for v in ["1", "true", " TRUE ", "Yes", "on"] {
+                let notes = shadow_notes_for(&ctx, "work", &[(name, v)]);
+                assert_eq!(notes.len(), 1, "{name}={v:?} is truthy");
+                assert!(notes[0].starts_with(&format!("{name} ")), "{notes:?}");
+            }
+            // The docs leave values such as `2` and `enabled` unspecified: not truthy
+            // here is a choice, made so that only the plain spellings of yes count.
+            for v in ["", "0", "false", "no", "off", "2", "enabled"] {
+                assert!(shadow_notes_for(&ctx, "work", &[(name, v)]).is_empty());
+            }
+        }
+    }
+
+    /// Each credential variable is reported once, by name, when it is not empty, and
+    /// no note holds a value or any 8-byte piece of one (a note lands in terminal logs).
+    #[test]
+    fn a_credential_variable_is_named_and_never_valued() {
+        const SECRET: &str = "sk-ant-oat01-SECRETVALUE";
+        let (_root, ctx) = shadow_ctx(false);
+        let leaks = |notes: &[String], secret: &str| {
+            let text = notes.concat();
+            secret
+                .as_bytes()
+                .windows(8)
+                .any(|w| text.contains(std::str::from_utf8(w).expect("ascii")))
+        };
+        for name in [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_PROFILE",
+        ] {
+            let notes = shadow_notes_for(&ctx, "work", &[(name, SECRET)]);
+            assert_eq!(notes.len(), 1, "{name}: {notes:?}");
+            assert!(notes[0].starts_with(&format!("{name} ")), "{notes:?}");
+            assert!(!leaks(&notes, SECRET), "{name}: {notes:?}");
+            assert!(shadow_notes_for(&ctx, "work", &[(name, "")]).is_empty());
+        }
+        // Federation credentials need both variables.
+        let rule = ("ANTHROPIC_FEDERATION_RULE_ID", "fedrule-RULESECRET");
+        let org = ("ANTHROPIC_ORGANIZATION_ID", "org-ORGSECRET1234");
+        assert!(shadow_notes_for(&ctx, "work", &[rule]).is_empty());
+        assert!(shadow_notes_for(&ctx, "work", &[org]).is_empty());
+        let notes = shadow_notes_for(&ctx, "work", &[rule, org]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].starts_with("ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_ORGANIZATION_ID "),
+            "{notes:?}"
+        );
+        assert!(!leaks(&notes, rule.1) && !leaks(&notes, org.1), "{notes:?}");
+    }
+
+    /// On Linux `~/.claude` holds the file the switch writes, so a note there is
+    /// noise (also spelled with a trailing or doubled slash, or through a symlinked
+    /// home); on a Mac its Keychain entry is keyed to the directory, so it is real.
+    #[test]
+    fn the_default_config_dir_is_noted_only_on_macos() {
+        for darwin in [false, true] {
+            let (root, ctx) = shadow_ctx(darwin);
+            let dir = format!("{}/.claude", ctx.home.display());
+            let spellings = [
+                dir.clone(),
+                format!("{dir}/"),
+                format!("{}//.claude", ctx.home.display()),
+                format!("{}/link/.claude", root.display()),
+            ];
+            for cfg in spellings {
+                let notes = shadow_notes_for(&ctx, "work", &[("CLAUDE_CONFIG_DIR", &cfg)]);
+                assert_eq!(notes.len(), usize::from(darwin), "darwin={darwin} {cfg}");
+            }
+            // A newline in the value is escaped, so it cannot print a forged
+            // `note:` line of its own.
+            let forged = format!("{dir}-x\nnote: forged");
+            for cfg in [format!("{dir}/sub"), format!("{dir}-other"), forged] {
+                let notes = shadow_notes_for(&ctx, "work", &[("CLAUDE_CONFIG_DIR", &cfg)]);
+                assert_eq!(notes.len(), 1, "{cfg}");
+                assert!(!notes[0].contains('\n'), "{notes:?}");
+            }
+        }
+    }
+
+    /// A pane home names its alias, but a deeper directory keeps its own login and
+    /// the bare homes directory is no pane. A pane for the account being switched to
+    /// gets no pane note; any token or key variable is a cause of its own and is
+    /// noted in a pane too.
+    #[test]
+    fn a_pane_home_names_its_alias() {
+        let (root, ctx) = shadow_ctx(false);
+        let homes = ctx.homes.display().to_string();
+        let linked = format!("{}/link/.sharkswap/homes/work", root.display());
+        for cfg in [format!("{homes}/work"), format!("{homes}/work/"), linked] {
+            let env = [("CLAUDE_CONFIG_DIR", cfg.as_str())];
+            let notes = shadow_notes_for(&ctx, "personal", &env);
+            assert_eq!(notes.len(), 1, "{cfg}: {notes:?}");
+            assert!(
+                notes[0].starts_with("this shell is sharkswap pane 'work'"),
+                "{notes:?}"
+            );
+            let same = shadow_notes_for(&ctx, "work", &env);
+            assert!(
+                same.is_empty(),
+                "the pane of the target needs no note: {same:?}"
+            );
+        }
+        for cfg in [
+            format!("{homes}/work/sub"),
+            homes.clone(),
+            format!("{homes}/"),
+            format!("{homes}/.hidden"),
+            format!("{homes}/availability"),
+        ] {
+            let notes = shadow_notes_for(&ctx, "work", &[("CLAUDE_CONFIG_DIR", &cfg)]);
+            assert_eq!(notes.len(), 1, "{cfg}: {notes:?}");
+            assert!(notes[0].starts_with("CLAUDE_CONFIG_DIR is "), "{notes:?}");
+        }
+        let pane = format!("{homes}/work");
+        let token = ("CLAUDE_CODE_OAUTH_TOKEN", "pane-token");
+        let key = ("ANTHROPIC_API_KEY", "a-key");
+        // A pane without a token can still get one exported later, so the token is
+        // noted next to the pane note, and alone for the target's own pane.
+        let env = [("CLAUDE_CONFIG_DIR", pane.as_str()), token];
+        let notes = shadow_notes_for(&ctx, "personal", &env);
+        assert!(
+            notes.len() == 2
+                && notes[0].starts_with("this shell is sharkswap pane 'work'")
+                && notes[1].starts_with("CLAUDE_CODE_OAUTH_TOKEN "),
+            "{notes:?}"
+        );
+        let notes = shadow_notes_for(&ctx, "work", &env);
+        assert!(
+            notes.len() == 1 && notes[0].starts_with("CLAUDE_CODE_OAUTH_TOKEN "),
+            "{notes:?}"
+        );
+        let env = [("CLAUDE_CONFIG_DIR", pane.as_str()), token, key];
+        let notes = shadow_notes_for(&ctx, "work", &env);
+        assert!(
+            notes.len() == 2
+                && notes[0].starts_with("ANTHROPIC_API_KEY ")
+                && notes[1].starts_with("CLAUDE_CODE_OAUTH_TOKEN "),
+            "{notes:?}"
+        );
+        // Outside a pane the token is a second, separate cause.
+        let env = [("CLAUDE_CONFIG_DIR", "/elsewhere/claude"), token];
+        assert_eq!(shadow_notes_for(&ctx, "work", &env).len(), 2);
+    }
+
+    /// The directory checks compare the bytes the environment holds: a home with a
+    /// byte that is not UTF-8 is still the home of its own `~/.claude`. No file is
+    /// read, so the test needs no such name on disk.
+    #[test]
+    fn a_config_dir_that_is_not_utf8_is_compared_as_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let (_root, mut ctx) = shadow_ctx(false);
+        let mut bytes = b"/home/\xff-user".to_vec();
+        ctx.home = PathBuf::from(OsString::from_vec(bytes.clone()));
+        bytes.extend_from_slice(b"/.claude");
+        let cfg = OsString::from_vec(bytes);
+        let get = |name: &str| {
+            if name == "CLAUDE_CONFIG_DIR" {
+                cfg.clone()
+            } else {
+                OsString::new()
+            }
+        };
+        assert!(shadow_notes(&ctx, "work", get).is_empty());
+        ctx.darwin = true;
+        assert_eq!(shadow_notes(&ctx, "work", get).len(), 1);
     }
 }

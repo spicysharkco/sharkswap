@@ -80,6 +80,8 @@ s_switch() {
   cs work
   assert_rc "switch to work" 0
   assert_out_has "reports the new account" "Done. Active: alice@example.com"
+  # A note on every switch, shadowed or not, would be noise nobody reads.
+  assert_out_lacks "a switch from a plain shell prints no note" "note: "
   assert_eq "live email is work's" "alice@example.com" "$(live_email)"
   assert_eq "live token is work's" "$(fake_token 1)" "$(live_token)"
   assert_eq "the second copy of the metadata is patched too" "alice@example.com" "$(jq -r .oauthAccount.emailAddress "$H/.claude/.claude.json")"
@@ -100,6 +102,33 @@ s_switch() {
   assert_rc "unknown alias is refused" 1
   assert_err_has "says which accounts exist" "unknown account 'nosuch'"
   assert_eq "an unknown alias changes nothing" "alice@example.com" "$(live_email)"
+
+  # A switch from a shell that `cs pane` made names the pane's alias in a note. The
+  # pane's directory is read from the export line `cs pane` prints, so the note is
+  # tied to what it really sets.
+  cs pane work
+  assert_rc "a pane for the note test" 0
+  local pane_export pane_dir
+  pane_export="$(grep '^export CLAUDE_CONFIG_DIR=' <<<"$OUT" || true)"
+  assert_eq "cs pane prints an export line for the config directory" "1" "$([[ -n "$pane_export" ]] && echo 1 || echo 0)"
+  pane_dir="$(eval "$pane_export"; printf '%s' "${CLAUDE_CONFIG_DIR-}")"
+  CS_ENV=(CLAUDE_CONFIG_DIR="$pane_dir")
+  cs personal
+  assert_rc "a switch from a pane shell still succeeds" 0
+  assert_eq "and that switch happened" "bob@example.com" "$(live_email)"
+  assert_err_has "and the note names the pane's alias" "note: this shell is sharkswap pane 'work'"
+  CS_ENV=()
+
+  # A switch from a shell that shadows the stored login notes the variables that do
+  # it. The token's value must not be echoed back.
+  CS_ENV=(CLAUDE_CONFIG_DIR=/elsewhere/claude CLAUDE_CODE_OAUTH_TOKEN=shadow-token-value)
+  cs work
+  assert_rc "a switch from a shell that shadows the login still succeeds" 0
+  assert_eq "and the switch happened" "alice@example.com" "$(live_email)"
+  assert_err_has "and the note names the config directory variable" "note: CLAUDE_CONFIG_DIR is \"/elsewhere/claude\""
+  assert_err_has "and the note names the token variable" "note: CLAUDE_CODE_OAUTH_TOKEN is set"
+  assert_out_lacks "and the token value is never printed" "shadow-token-value"
+  CS_ENV=()
 
   mk_login carol@example.com 3 1000
   cs save lapsed

@@ -654,7 +654,12 @@ any other keychain. The hooks are for tests, not settings; do not set them.
 - The probe spends one token of the account's allowance per request. So does the
   organization check of `cs token set`.
 - The switch is global to the machine: it changes the login every new `claude` session
-  uses. Use `cs pane` for per-terminal accounts.
+  uses. Use `cs pane` for per-terminal accounts. A shell that sets `CLAUDE_CONFIG_DIR`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, an API key or auth token (an interactive `claude` asks once
+  before it uses `ANTHROPIC_API_KEY`), a profile, federation credentials or a truthy
+  cloud provider variable can keep using another login. `cs <alias>` prints a `note:`
+  naming each such variable (or the pane) it finds, and never a credential value. On Linux,
+  `CLAUDE_CONFIG_DIR=~/.claude` is the same login and gets no note.
 - An interrupted switch is detected, not repaired: see "An interrupted switch" for what
   `cs` refuses until you have looked and cleared the lock yourself.
 - Usage figures come from headers that can read a few points above the usage page.
