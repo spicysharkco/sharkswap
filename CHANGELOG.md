@@ -7,6 +7,8 @@ version (0.x.0) may change commands, output or file formats.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-19
+
 ### Changed
 
 - Any switch (`cs <alias>`, `cs next`, `cs best --switch`) prints a `note:` line on stderr
@@ -167,7 +169,8 @@ numbered as a beta from 0.2.0 on, and this entry carries the number it should ha
 - `cs watch`, which re-saves the active token whenever Claude Code refreshes it.
 - macOS Keychain support through `/usr/bin/security`, and file-based logins on Linux.
 
-[Unreleased]: https://github.com/spicysharkco/sharkswap/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/spicysharkco/sharkswap/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/spicysharkco/sharkswap/releases/tag/v0.6.0
 [0.5.0]: https://github.com/spicysharkco/sharkswap/releases/tag/v0.5.0
 [0.4.0]: https://github.com/spicysharkco/sharkswap/releases/tag/v0.4.0
 [0.3.0]: https://github.com/spicysharkco/sharkswap/releases/tag/v0.3.0
