@@ -96,16 +96,16 @@ the archive for your system and the `SHA256SUMS` file:
 | Linux, ARM64 | `sharkswap-VERSION-aarch64-unknown-linux-musl.tar.gz` |
 
 The Linux binaries are statically linked, so they run on any distribution. Check the
-archive, unpack it and install. The example is version 0.4.0 for Apple silicon; set `a`
+archive, unpack it and install. The example is version 0.5.0 for Apple silicon; set `a`
 to the archive name for your version and system from the table above, without
 `.tar.gz`:
 
 ```sh
-a=sharkswap-0.4.0-aarch64-apple-darwin
+a=sharkswap-0.5.0-aarch64-apple-darwin
 grep -F " $a.tar.gz" SHA256SUMS | shasum -a 256 -c -
 gh attestation verify "$a.tar.gz" --repo spicysharkco/sharkswap \
   --signer-workflow spicysharkco/sharkswap/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.4.0
+  --source-ref refs/tags/v0.5.0
 tar -xzf "$a.tar.gz"
 xattr -dr com.apple.quarantine "$a"
 cd "$a"
