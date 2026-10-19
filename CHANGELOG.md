@@ -7,6 +7,20 @@ version (0.x.0) may change commands, output or file formats.
 
 ## [Unreleased]
 
+### Changed
+
+- `cs best` and `cs probe` show when the 5-hour window resets, not only the week. A row
+  whose 5-hour window is spent (`BLOCKED` in `best`, `5H FULL` in `probe`) used to show only
+  the week reset, such as `in 1d12h`, when it reopens in under an hour. The `best` table
+  replaces its `RESETS AT` ISO column with `WK-RESET` and `5H-RESET`, written as
+  `in 5d08h` from a day on and `in 0h42m` below it, or `-` when the reset is unknown or has
+  passed. The `probe` table keeps `WEEK-RESET` and gains `5H-RESET` after it, in the
+  same form; under a day, `WEEK-RESET` now reads `in 23h59m` where it read `in 0d23h`.
+- `cs best --raw` appends a 7th field, the time the 5-hour window resets (ISO time, or `-`),
+  after the 5-hour %. Fields 1 to 6 keep their places, so a script that picks fields by
+  number keeps working; one that reads exactly six fields, such as `read -r a b c d e f`,
+  now gets the 5-hour % and the new field together in its last variable.
+
 ## [0.4.0] - 2026-10-18
 
 ### Changed

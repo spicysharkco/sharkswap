@@ -5,8 +5,11 @@
 //! is the parsing contract for scripts:
 //!
 //! ```text
-//! <alias>  <week% used|->  <week resets at|->  <reading age, days|->  <state>  <5h% used|->
+//! <alias>  <week% used|->  <week resets at|->  <reading age, days|->  <state>  <5h% used|->  <5h resets at|->
 //! ```
+//!
+//! Both reset times are ISO UTC. The 5h reset comes last so that fields 1 to 6
+//! keep their places for scripts that read by index.
 //!
 //! State is
 //!   fresh      a current reading, neither window spent
@@ -60,10 +63,11 @@ fn cap_state_of(hit: Option<&Hit>) -> Option<&'static str> {
 pub struct Pick {
     pub id: String,
     pub weekly: Option<i64>,
-    pub reset: String,
+    pub weekly_reset_ms: Option<f64>,
     pub age_days: Option<f64>,
     pub state: &'static str,
     pub session: Option<i64>,
+    pub session_reset_ms: Option<f64>,
     binding: i64,
     order: i32,
     cap: Option<Hit>,
@@ -178,19 +182,18 @@ pub fn rank(store: &Path, now: f64) -> Result<(Vec<Pick>, crate::caps::CapsView)
             Some(s) => Some(s / 86_400_000.0),
             None => age,
         };
-        let reset = match week.and_then(|w| w.reset_ms).filter(|r| *r != 0.0) {
-            Some(r) => iso_ms(r),
-            None => "-".into(),
-        };
+        let weekly_reset_ms = week.and_then(|w| w.reset_ms).filter(|r| *r != 0.0);
+        let session_reset_ms = sess.and_then(|w| w.reset_ms).filter(|r| *r != 0.0);
         picks.push(Pick {
             binding: weekly.unwrap_or(0).max(session.unwrap_or(0)),
             order: order_of(state),
             id,
             weekly,
-            reset,
+            weekly_reset_ms,
             age_days,
             state,
             session,
+            session_reset_ms,
             cap,
         });
     }
@@ -198,9 +201,10 @@ pub fn rank(store: &Path, now: f64) -> Result<(Vec<Pick>, crate::caps::CapsView)
     Ok((picks, caps))
 }
 
-/// The ranked rows as `best --raw` prints them; the ceiling legend goes to
-/// stderr as it is built. Err(3) means the refusal is already explained.
-pub fn best(store: &Path) -> Result<String, i32> {
+/// The ranked rows as `best --raw` prints them, with the picks they were made
+/// from; the ceiling legend goes to stderr as it is built. Err(3) means the
+/// refusal is already explained.
+pub fn best(store: &Path) -> Result<(String, Vec<Pick>), i32> {
     let Ok((picks, caps)) = rank(store, clock_ms()) else {
         return Err(3);
     };
@@ -208,7 +212,7 @@ pub fn best(store: &Path) -> Result<String, i32> {
     for line in legend {
         eprintln!("{line}");
     }
-    Ok(rows)
+    Ok((rows, picks))
 }
 
 /// The stdout rows and the stderr legend lines for ranked picks.
@@ -217,14 +221,16 @@ fn render(picks: &[Pick], caps: &crate::caps::CapsView) -> (String, Vec<String>)
     for p in picks {
         let age = p.age_days.map_or("-".to_string(), |d| to_fixed(d, 1));
         let dash = |v: Option<i64>| v.map_or("-".to_string(), |n| n.to_string());
+        let iso = |ms: Option<f64>| ms.map_or("-".to_string(), iso_ms);
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             p.id,
             dash(p.weekly),
-            p.reset,
+            iso(p.weekly_reset_ms),
             age,
             p.state,
-            dash(p.session)
+            dash(p.session),
+            iso(p.session_reset_ms)
         ));
     }
     let mut legend: Vec<String> = caps.notes.iter().map(|n| format!("note: {n}")).collect();
@@ -432,6 +438,19 @@ mod tests {
         assert_eq!(by["spent"], "SPENT");
         assert_eq!(by["lapsed"], "EXPIRED");
         assert_eq!(by["tok"], "PROBE-ERR");
+        let row = |a: &str| rows.iter().find(|r| r[0] == a).unwrap();
+        assert_eq!(row("fresh").len(), 7, "the 5h reset is a 7th field");
+        assert_eq!(
+            row("fresh")[2],
+            iso_ms(NOW + 48.0 * H),
+            "field 3 is the week"
+        );
+        assert_eq!(
+            row("fresh")[6],
+            iso_ms(NOW + 2.0 * H),
+            "field 7 is the 5h window"
+        );
+        assert_eq!(row("never")[6], "-", "no reading, no 5h reset");
         let order: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
         let at = |a: &str| order.iter().position(|x| *x == a).unwrap();
         assert!(at("fresh") < at("half"));

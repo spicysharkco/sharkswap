@@ -1016,6 +1016,11 @@ s_probe() {
   assert_eq "work reads 85 and 30" "1" "$(grep -cE '^work +ok +85 +30 ' <<<"$OUT" || true)"
   assert_eq "personal is shown full" "1" "$(grep -cE '^personal +5H FULL' <<<"$OUT" || true)"
   assert_eq "an unauthorised account is shown as such" "1" "$(grep -cE '^broken +AUTH 401' <<<"$OUT" || true)"
+  # The stub puts the 5h reset an hour out and the week reset a day out; the run takes a few seconds.
+  assert_eq "the table has a 5H-RESET column after WEEK-RESET" "1" "$(grep -cE '^ALIAS +STATUS +5H +WEEK +WEEK-RESET +5H-RESET$' <<<"$OUT" || true)"
+  assert_eq "a 5H FULL row shows when its 5h window reopens" "1" "$(grep -cE '^personal +5H FULL .* in (0h5[0-9]m|1h00m)$' <<<"$OUT" || true)"
+  assert_eq "WEEK-RESET keeps its clock time, counted down like the new column" "1" "$(grep -cE '^personal .* [A-Z][a-z]{2} [0-9]{2}:[0-9]{2} in (23h5[0-9]m|1d00h) +in ' <<<"$OUT" || true)"
+  assert_eq "a row with no reading has a dash in both reset columns" "1" "$(grep -cE '^broken +AUTH 401 +- +- +- +-$' <<<"$OUT" || true)"
   local av="$H/.sharkswap/availability.json"
   assert_mode "availability.json is 0600" "$av" 600
   assert_eq "work is recorded ok" "ok" "$(jq -r .work.state "$av")"
@@ -1247,10 +1252,19 @@ s_best_and_bar() {
   assert_eq "states" "fresh fresh BLOCKED " "$states"
   assert_eq "week percentage column" "20 60 40" "$(cut -f2 <<<"$OUT" | tr '\n' ' ' | sed 's/ $//')"
   assert_eq "5h percentage column" "10 50 100" "$(cut -f6 <<<"$OUT" | tr '\n' ' ' | sed 's/ $//')"
+  assert_eq "every row gains a 7th field and no more" "7 7 7" "$(awk -F'\t' '{print NF}' <<<"$OUT" | tr '\n' ' ' | sed 's/ $//')"
+  local reset5h resetwk iso='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$'
+  reset5h="$(grep '^gamma' <<<"$OUT" | cut -f7)"
+  resetwk="$(grep '^gamma' <<<"$OUT" | cut -f3)"
+  assert_eq "a blocked row's 7th field is the time its 5h window reopens" "1" "$(grep -cE "$iso" <<<"$reset5h" || true)"
+  assert_eq "and it is not the week reset in the 3rd field" "1" "$([[ "$reset5h" < "$resetwk" ]] && echo 1 || echo 0)"
 
   cs best
   assert_out_has "best table" "ALIAS"
   assert_out_has "best lists the blocked account" "BLOCKED"
+  assert_eq "the table header names both resets" "1" "$(grep -cE '^ +ALIAS +WK +5H +WK-RESET +5H-RESET +AGE +STATE$' <<<"$OUT" || true)"
+  assert_eq "the table no longer has the single ISO column" "0" "$(grep -c 'RESETS AT' <<<"$OUT" || true)"
+  assert_eq "the blocked row shows when its 5h window reopens" "1" "$(grep -cE '^ +gamma +40% +100% +in (23h5[0-9]m|1d00h) +in (0h5[0-9]m|1h00m) +[0-9. ]+d +BLOCKED$' <<<"$OUT" || true)"
 
   cs best --switch
   assert_rc "best --switch" 0
@@ -1266,6 +1280,8 @@ s_best_and_bar() {
   rm -f "$H/.sharkswap/availability.json"
   cs bar bravo
   assert_out_has "bar without a reading says so" "no reading"
+  cs best --raw
+  assert_eq "a row with no reading keeps 7 fields and a dash for the 5h reset" "- - -" "$(cut -f7 <<<"$OUT" | tr '\n' ' ' | sed 's/ $//')"
   stub_stop
 }
 

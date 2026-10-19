@@ -1641,7 +1641,7 @@ pub fn cmd_best(ctx: &Ctx, args: &[String]) -> Res {
         return Err(1);
     }
     // Err(3): the ranking refused and has said why.
-    let Ok(rows) = crate::views::best(&ctx.store) else {
+    let Ok((rows, ranked)) = crate::views::best(&ctx.store) else {
         return Err(1);
     };
     let picks = trim_nl(&rows);
@@ -1693,8 +1693,8 @@ pub fn cmd_best(ctx: &Ctx, args: &[String]) -> Res {
         "  BLOCKED = 5h window spent. SPENT = week spent or refused. STALE/EXPIRED = saved login too old or lapsed."
     );
     println!(
-        "  {:<12} {:>5} {:>5}  {:<26} {:>5}  STATE",
-        "ALIAS", "WK", "5H", "RESETS AT", "AGE"
+        "  {:<12} {:>5} {:>5}  {:<9}  {:<9}  {:>5}  STATE",
+        "ALIAS", "WK", "5H", "WK-RESET", "5H-RESET", "AGE"
     );
     let cell = |v: &str| -> String {
         let digits = v.strip_prefix('-').unwrap_or(v);
@@ -1707,7 +1707,9 @@ pub fn cmd_best(ctx: &Ctx, args: &[String]) -> Res {
             format!("{v:>5}")
         }
     };
-    for l in picks.lines() {
+    let now = crate::avail::clock_ms();
+    // `picks` has one line per ranked row, in the same order.
+    for (l, p) in picks.lines().zip(&ranked) {
         let f = fields(l);
         let at = |i: usize| f.get(i).map_or("", String::as_str);
         let age = if at(3) == "-" {
@@ -1716,11 +1718,12 @@ pub fn cmd_best(ctx: &Ctx, args: &[String]) -> Res {
             format!("{:4.1}d", at(3).parse::<f64>().unwrap_or(0.0))
         };
         println!(
-            "  {:<12} {} {}  {:<26} {}  {}",
+            "  {:<12} {} {}  {:<9}  {:<9}  {}  {}",
             at(0),
             cell(at(1)),
             cell(at(5)),
-            at(2),
+            fmt_until(p.weekly_reset_ms, now),
+            fmt_until(p.session_reset_ms, now),
             age,
             at(4)
         );

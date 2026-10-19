@@ -121,6 +121,21 @@ pub fn iso_secs(secs: i64) -> String {
     )
 }
 
+/// A reset as a countdown cell: `in 5d08h` from a day on, `in 0h42m` below it,
+/// both cut down to the unit shown. `-` when there is no reset or it is not
+/// ahead of `now_ms`.
+pub fn fmt_until(reset_ms: Option<f64>, now_ms: f64) -> String {
+    let Some(at) = reset_ms.filter(|r| *r > now_ms) else {
+        return "-".into();
+    };
+    let left = ((at - now_ms) / 1000.0) as i64;
+    if left >= 86_400 {
+        format!("in {}d{:02}h", left / 86_400, left % 86_400 / 3600)
+    } else {
+        format!("in {}h{:02}m", left / 3600, left % 3600 / 60)
+    }
+}
+
 pub fn wall_ms() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -554,6 +569,25 @@ mod tests {
             .collect();
         v.sort();
         v
+    }
+
+    #[test]
+    fn a_countdown_cell_reads_hours_and_minutes_below_a_day_and_days_above() {
+        let now = 1_800_000_000_000.0;
+        let left = |secs: f64| fmt_until(Some(now + secs * 1000.0), now);
+        assert_eq!(left(0.0), "-", "a reset at this instant is not ahead");
+        assert_eq!(left(-1.0), "-", "a reset in the past");
+        assert_eq!(fmt_until(None, now), "-", "no reset");
+        assert_eq!(fmt_until(Some(f64::NAN), now), "-");
+        assert_eq!(left(59.0), "in 0h00m");
+        assert_eq!(left(42.0 * 60.0), "in 0h42m");
+        assert_eq!(left(3600.0), "in 1h00m");
+        assert_eq!(left(86_400.0 - 1.0), "in 23h59m");
+        assert_eq!(left(86_400.0), "in 1d00h");
+        assert_eq!(
+            left(5.0 * 86_400.0 + 8.0 * 3600.0 + 59.0 * 60.0),
+            "in 5d08h"
+        );
     }
 
     #[test]

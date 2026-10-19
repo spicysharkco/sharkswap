@@ -474,8 +474,9 @@ pub fn verdict(r: &Reply) -> Verdict {
     }
 }
 
-/// The four display cells of one reply: status, 5h, week and week-reset.
-pub fn display(r: &Reply, v: &Verdict, now: i64) -> [String; 4] {
+/// The five display cells of one reply: status, 5h, week, week-reset and
+/// 5h-reset.
+pub fn display(r: &Reply, v: &Verdict, now: i64) -> [String; 5] {
     let cell = if v.state == "ok" {
         "ok".to_string()
     } else {
@@ -506,20 +507,23 @@ pub fn display(r: &Reply, v: &Verdict, now: i64) -> [String; 4] {
     let reset = match r.limits.get("7d").and_then(win_resets) {
         None => "-".to_string(),
         Some(at) => {
-            let at = at as i64;
-            let mut s = local_fmt(at, "%a %H:%M").unwrap_or_default();
-            let left = at - now;
-            if left > 0 {
-                s.push_str(&format!(
-                    " in {}d{:02}h",
-                    left / 86_400,
-                    left % 86_400 / 3600
-                ));
+            let mut s = local_fmt(at as i64, "%a %H:%M").unwrap_or_default();
+            let left = fmt_until(Some(at * 1000.0), now as f64 * 1000.0);
+            if left != "-" {
+                s.push(' ');
+                s.push_str(&left);
             }
             s
         }
     };
-    [cell, pct("5h"), pct("7d"), reset]
+    let reset_5h = fmt_until(
+        r.limits
+            .get("5h")
+            .and_then(win_resets)
+            .map(|secs| secs * 1000.0),
+        now as f64 * 1000.0,
+    );
+    [cell, pct("5h"), pct("7d"), reset, reset_5h]
 }
 
 /// A whole-number float as text, without a fraction.
@@ -547,7 +551,7 @@ pub struct Obs {
 
 pub struct Outcome {
     pub obs: Obs,
-    pub row: [String; 4],
+    pub row: [String; 5],
     /// What the API said when it refused the credential, if it said.
     pub message: Option<String>,
 }
@@ -760,8 +764,8 @@ pub fn cmd_probe(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
 
     // Size each column to its own widest cell: a fixed width shifts every later
     // column the moment one cell outgrows it.
-    let (mut wa, mut ws, mut w5, mut ww) = (5usize, 6usize, 2usize, 4usize);
-    let mut rows: Vec<(String, Option<[String; 4]>)> = Vec::new();
+    let (mut wa, mut ws, mut w5, mut ww, mut wr) = (5usize, 6usize, 2usize, 4usize, 10usize);
+    let mut rows: Vec<(String, Option<[String; 5]>)> = Vec::new();
     for a in &shown {
         wa = wa.max(a.chars().count());
         if !jobs.iter().any(|(j, _)| j == a) {
@@ -778,11 +782,13 @@ pub fn cmd_probe(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
                     "?".to_string(),
                     "?".to_string(),
                     "?".to_string(),
+                    "?".to_string(),
                 ]
             });
         ws = ws.max(row[0].chars().count());
         w5 = w5.max(row[1].chars().count());
         ww = ww.max(row[2].chars().count());
+        wr = wr.max(row[3].chars().count());
         rows.push((a.clone(), Some(row)));
     }
     if shown.is_empty() {
@@ -790,15 +796,15 @@ pub fn cmd_probe(ctx: &Ctx, args: &[String]) -> Result<(), i32> {
         return Err(1);
     }
     println!(
-        "{:<wa$}  {:<ws$}  {:<w5$}  {:<ww$}  WEEK-RESET",
-        "ALIAS", "STATUS", "5H", "WEEK"
+        "{:<wa$}  {:<ws$}  {:<w5$}  {:<ww$}  {:<wr$}  5H-RESET",
+        "ALIAS", "STATUS", "5H", "WEEK", "WEEK-RESET"
     );
     for (a, row) in &rows {
         match row {
             None => println!("{a:<wa$}  no credential here"),
             Some(r) => println!(
-                "{a:<wa$}  {:<ws$}  {:<w5$}  {:<ww$}  {}",
-                r[0], r[1], r[2], r[3]
+                "{a:<wa$}  {:<ws$}  {:<w5$}  {:<ww$}  {:<wr$}  {}",
+                r[0], r[1], r[2], r[3], r[4]
             ),
         }
     }

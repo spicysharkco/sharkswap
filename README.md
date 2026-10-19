@@ -179,9 +179,9 @@ claude
 | `cs list` | Saved accounts, with a mark for a captured token and for an expired login. |
 | `cs save <alias> [--force]` | Snapshot the current login as `alias`. Refused when this login is already saved under an alias that has a ceiling, unless `--force`. |
 | `cs watch` | Run in the foreground and re-save the active token whenever it changes (Claude Code refreshes tokens). |
-| `cs best [--switch\|--raw]` | Rank saved accounts by their recorded readings (sends no request), most usable first. `--switch` moves to the top usable one. `--raw` prints tab-separated rows. |
+| `cs best [--switch\|--raw]` | Rank saved accounts by their recorded readings (sends no request), most usable first. `--switch` moves to the top usable one. `--raw` prints tab-separated rows. The table shows when the week and the 5-hour window reset (`WK-RESET`, `5H-RESET`), so a blocked row says when it reopens. |
 | `cs bar [alias]` | One status-bar line from the recorded reading (sends no request): `alias · 5h N% · wk N%`, plus age, login time left and any cap. |
-| `cs probe [alias...]` | Send one 1-token request per account and record 5-hour and weekly use from the response headers. |
+| `cs probe [alias...]` | Send one 1-token request per account and record 5-hour and weekly use from the response headers. The table shows when the week (`WEEK-RESET`) and the 5-hour window (`5H-RESET`) reset. |
 | `cs token set\|rm\|list\|check\|print <alias>` | Manage one-year tokens from `claude setup-token`. `set [--force]` reads the token from stdin and checks its organization (see below). `check` asks the usage endpoint whether the token can read quota, and with `--model` sends one request through `claude -p`. `print` writes the token to standard output, only when that is not a terminal (see below). |
 | `cs remove <alias>` | Delete a saved account, its token and its pane directory. |
 | `cs rotate [options]` | One rotation run, meant for a timer (see Rotation). |
@@ -191,8 +191,8 @@ claude
 The command words above, and `-h`, `--help`, `--version` and `-V`, are reserved, so they cannot be used as aliases.
 
 `best --raw` columns: alias, weekly %, weekly reset (ISO time), age in days, state,
-5-hour %. States: `fresh`, `PROBE-OK`, `PROBE-?`, `PROBE-ERR`, `BLOCKED`, `SPENT`,
-`STALE`, `EXPIRED`.
+5-hour %, 5-hour reset (ISO time). A reset that is not known is `-`. States: `fresh`,
+`PROBE-OK`, `PROBE-?`, `PROBE-ERR`, `BLOCKED`, `SPENT`, `STALE`, `EXPIRED`.
 
 When an alias has a one-year token, `cs pane` prints a second line, of the form
 
